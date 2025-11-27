@@ -2,34 +2,15 @@
 """
 Stochastic Landscape Model (SLM) - Core Functions
 
-This module contains the core functions for the stochastic network-scale
-hydrological-biogeochemical model that simulates discharge and concentration
-time series for analysis of space-time variance of water quality in rivers.
-
-Example Usage:
---------------
-    # Set up parameters dictionary
-    params = {
-        'random_state_times': 42,
-        'random_state_rain': 123,
-        'tmax_yrs': 5,
-        'rain_per_year': 100,
-        'interarrival_time_mean': 5.0,
-        # ... (see subcatchment_scale_module docstring for full parameter list)
-    }
-
-    # Generate discharge and concentration time series
-    discharge, concentration, mass_flux = subcatchment_scale_module(params)
-
-    # Route through river network
-    routed_flow, routed_conc, depth, celerity = routing_function_ocn(
-        inflow=discharge, conc=concentration, dx=1000, dt_ref=24, ...)
+This script contains:
+(1) Subcatchment-scale stochastic model of Musolff et al. (2017) (https://doi.org/10.1002/2017GL072630)
+(2) MCT routing algorithm (https://doi.org/10.5194/hess-11-1645-2007)
 
 Author: schauer
 Created: Fri Feb 23 09:40:07 2024
 """
 
-from typing import Dict, Tuple, Union
+from typing import Dict, Tuple, Union, List
 
 import numpy as np
 import pandas as pd
@@ -91,7 +72,7 @@ def calculate_cumulative_rainfall_for_event(
 
 
 def calculate_event_mass_fractions(
-    cumulative_rainfall: np.ndarray, sigma_ln_streamtube: float, mu_ln_streamtube: float
+    cumulative_rainfall: np.ndarray, mu_ln_streamtube: float, sigma_ln_streamtube: float
 ) -> np.ndarray:
     """
     Calculate mass fractions for distributing solute among future events.
@@ -103,10 +84,10 @@ def calculate_event_mass_fractions(
     ----------
     cumulative_rainfall : np.ndarray
         Cumulative rainfall amounts for the event sequence.
-    sigma_ln_streamtube : float
-        Standard deviation of log-normal streamtube length distribution.
     mu_ln_streamtube : float
         Mean of log-normal streamtube length distribution.
+    sigma_ln_streamtube : float
+        Standard deviation of log-normal streamtube length distribution.
 
     Returns
     -------
@@ -120,11 +101,11 @@ def calculate_event_mass_fractions(
     The first element represents the fraction remaining at the source event.
     """
     # Calculate cumulative fractions using lognormal CDF
-    cumulative_fractions = lognorm.cdf(
+    cumulative_fractions = np.asarray(lognorm.cdf(
         x=cumulative_rainfall,
         s=sigma_ln_streamtube,
         scale=np.exp(mu_ln_streamtube),
-    )
+    ))
 
     # Convert cumulative to incremental fractions
     incremental_fractions = cumulative_fractions.copy()
@@ -142,12 +123,9 @@ def subcatchment_scale_module(
     param_dict: Dict[str, Union[float, int]],
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Generate stochastic time series of discharge, concentration, and mass flux
-    at the subcatchment scale.
-
     This function implements the stochastic model described in Musolff et al. (2017)
     (https://doi.org/10.1002/2017GL072630) to simulate discharge and solute
-    transport in catchments with different solute source zone distributions.
+    transport in catchments with different solute source distributions.
 
     Parameters
     ----------
@@ -175,7 +153,6 @@ def subcatchment_scale_module(
                 Damköhler number for transport (Da2)
             - damkohler_longterm : float
                 Damköhler number for long-term changes (Da3)
-
             - oro_scaling : float
                 Orographic scaling factor for precipitation
             - tmax_yrs : float
@@ -190,7 +167,6 @@ def subcatchment_scale_module(
                 Catchment elevation [m]
             - rho : float
                 Asynchrony parameter (0-1)
-
             - z_r : float
                 Root zone thickness [cm]
             - z_vz : float
@@ -224,12 +200,6 @@ def subcatchment_scale_module(
 
     Notes
     -----
-    The model simulates:
-    1. Stochastic rainfall events with exponential inter-arrival times
-    2. Hydrologic response using unit hydrograph approach
-    3. Solute mobilization and transport with travel time distributions
-    4. Biogeochemical reactions during transport
-
     The simulation includes a 7-year spin-up period which is removed from outputs.
     """
 
@@ -483,19 +453,19 @@ def subcatchment_scale_module(
     event_flux = np.zeros((total_simulation_days, number_events))
 
     # Pre-calculate unit hydrograph (exponential recession)
-    unit_hydrograph = expon.pdf(
+    unit_hydrograph = np.asarray(expon.pdf(
         np.arange(0, total_simulation_days), scale=1 / lambda_tr
-    )
+    ))
 
     for events_c in np.arange(0, number_events):
         # Calculate discharge hydrograph for each event
-        event_start_time = nonzero_times[events_c]
+        event_start_time = int(nonzero_times[events_c])
 
         if event_start_time == total_simulation_days:
             continue
         else:
             event_discharge[event_start_time:total_simulation_days, events_c] = (
-                nonzero_rain[events_c]
+                float(nonzero_rain[events_c])
                 * unit_hydrograph[1 : total_simulation_days - event_start_time + 1]
             )
 
@@ -526,13 +496,13 @@ def subcatchment_scale_module(
 
     # Calculate cumulative rain for each event
     rain_sums = [
-        calculate_cumulative_rainfall_for_event(xi, rain_sum, total_simulation_days)
+        calculate_cumulative_rainfall_for_event(event_index=xi, cumulative_rainfall=rain_sum, max_time=total_simulation_days)
         for xi in np.arange(0, number_events)
     ]
 
     # Calculate event fractions for future events for each event
     event_fractions_list = [
-        calculate_event_mass_fractions(xi, sigma_ln_tube, mu_ln_tube)
+        calculate_event_mass_fractions(cumulative_rainfall=xi, mu_ln_streamtube=mu_ln_tube, sigma_ln_streamtube=sigma_ln_tube)
         for xi in rain_sums
     ]
 
@@ -611,7 +581,7 @@ def subcatchment_scale_module(
 
 
 # ============================================================================
-# HYDRODYNAMIC ROUTING FUNCTIONS
+# ROUTING FUNCTIONS
 # ============================================================================
 
 
@@ -627,12 +597,13 @@ def reach_routing(
     side_slope: float,
     vf: float,
     optimized_calc: bool = False,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Perform reach-scale hydrodynamic routing using Muskingum-Cunge-Todini method.
+    Perform routing using Muskingum-Cunge-Todini method.
 
-    This function routes water and solutes through a trapezoidal channel reach using
-    the Muskingum-Cunge-Todini approach from Todini et al. (2007) (https://doi.org/10.5194/hess-11-1645-2007).
+    This function routes water and solute flux through a trapezoidal channel reach using
+    the Muskingum-Cunge-Todini approach based on Todini et al. (2007) (https://doi.org/10.5194/hess-11-1645-2007).
+    Model implementation is adapted after https://doi.org/10.5281/zenodo.13128294 and https://github.com/hydpy-dev/hydpy.
 
     Parameters
     ----------
@@ -660,22 +631,24 @@ def reach_routing(
 
     Returns
     -------
-    tuple of np.ndarray
-        If optimized_calc=False:
-            - out_list : np.ndarray
-                Routed outflow discharge time series [m³/s]
-            - conc_routed_list : np.ndarray
-                Routed concentration time series [mg/L]
-            - storage_list : np.ndarray
-                Channel water storage time series [m³]
-            - t_list : np.ndarray
-                Time vector [s]
-            - in_list : np.ndarray
-                Inflow time series [m³/s]
-            - conc_list : np.ndarray
-                In-channel concentration time series [mg/L]
-        If optimized_calc=True:
-            Returns subset of above for computational efficiency.
+    out_list : np.ndarray
+        Time series of outflow discharge values [m³/s].
+    conc_routed_list : np.ndarray
+        Time series of outflow concentration values [mg/L].
+    t_list : np.ndarray
+        Time series of time steps [s].
+    storage_list : np.ndarray
+        Time series of storage values [m³] (NaN array if optimized_calc is True).
+    in_list : np.ndarray
+        Time series of inflow discharge values [m³/s] (NaN array if optimized_calc is True).
+    conc_list : np.ndarray
+        Time series of inflow concentration values [mg/L] (NaN array if optimized_calc is True).
+    load_storage_list : np.ndarray
+        Time series of storage load values [mg] (NaN array if optimized_calc is True).
+    depth_list : np.ndarray
+        Time series of flow depth values [m] (NaN array if optimized_calc is True).
+    celerity_list : np.ndarray
+        Time series of wave celerity values [m/s] (NaN array if optimized_calc is True).
 
     Notes
     -----
@@ -715,7 +688,7 @@ def reach_routing(
     dt = dt_ref
 
     # Initialize counters
-    i = 0
+    i = 0.0
     counter = 0
 
     # Pre-allocate arrays (oversized, will be trimmed later)
@@ -961,25 +934,25 @@ def reach_routing(
 
 @jit(nopython=True, fastmath=True)
 def reach_routing_single_time_step(
-    in_t,
-    in_t_1,
-    out_t,
-    dt,
-    dt_ref,
-    dt_array,
-    safety_factor,
-    dx,
-    bottom_slope,
-    bottom_width_int,
-    mannings_n,
-    sinus_alpha,
-    cot_alpha,
-    reynoldref1,
-    cref1,
-    betaref1,
-):
+    in_t: float,
+    in_t_1: float,
+    out_t: float,
+    dt: float,
+    dt_ref: float,
+    dt_array: np.ndarray,
+    safety_factor: float,
+    dx: float,
+    bottom_slope: float,
+    bottom_width_int: float,
+    mannings_n: float,
+    sinus_alpha: float,
+    cot_alpha: float,
+    reynoldref1: float,
+    cref1: float,
+    betaref1: float,
+) -> Tuple[float, float, float, float, float, float, float, float, float]:
     """
-    This function performs a single time step of the reach routing.
+    This function performs a single time step of the reach routing and is called by reach_routing function.
 
     Parameters
     ----------
@@ -1177,8 +1150,30 @@ def reach_routing_single_time_step(
         reynoldref2,
     )
 
-def resample_routed_lists(in_list, t_list, dt_ref):
-    """Resample the routed arrays to original frequency."""
+def resample_routed_lists(
+        in_list: np.ndarray,
+        t_list: np.ndarray,
+        dt_ref: float) -> pd.DataFrame:
+    """
+    Resample the routed arrays to original frequency.
+
+    This function interpolates routing results from variable time steps back to
+    a regular time grid matching the original simulation frequency.
+
+    Parameters
+    ----------
+    in_list : np.ndarray
+        Array of values to resample (e.g., discharge, concentration).
+    t_list : np.ndarray
+        Array of time values corresponding to in_list [hours].
+    dt_ref : float
+        Reference time step for resampling [hours].
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with resampled values and datetime index starting from 2000-01-01.
+    """
 
     # Generate original timestamp grid
     original_timestamps = np.arange(0, max(t_list) + dt_ref, dt_ref)
@@ -1211,19 +1206,19 @@ def resample_routed_lists(in_list, t_list, dt_ref):
 
 
 def routing_function_ocn(
-    inflow,
-    conc,
-    dx,
-    dt_ref,
-    bottom_slope,
-    mannings_n,
-    reach_length,
-    bottom_width_int,
-    side_slope,
-    vf,
-):
+    inflow: np.ndarray,
+    conc: np.ndarray,
+    dx: float,
+    dt_ref: float,
+    bottom_slope: float,
+    mannings_n: float,
+    reach_length: float,
+    bottom_width_int: float,
+    side_slope: float,
+    vf: float,
+) -> List:
     """
-    This function performs the routing of the inflow and concentration through the reach and is meant to be used in R.
+    This function is called in R and performs the routing using reach_routing function.
 
     Parameters
     ----------
@@ -1245,19 +1240,19 @@ def routing_function_ocn(
         Bottom width of the channel at the start of the reach
     side_slope : float
         Side slope of the channel
+    vf : float
+        mass transfer coefficient
 
     Returns
     -------
     outflow : np.array
         Array of outflow values [m^3/s]
-    inflow : np.array
-        Array of inflow values [m^3/s]
-    storage : np.array
-        Array of storage values [m^3]
     conc_routed : np.array
-        Array of concentration values [mg/L]
-    conc : np.array
-        Array of concentration values [mg/L]
+        Array of routed concentration values [mg/L]
+    median_depth : float
+        Median depth of the reach [m]
+    median_celerity : float
+        Median celerity of the reach [m/s]
     """
     # Convert inputs to numpy arrays and flatten
     inflow = np.array(inflow).flatten()
