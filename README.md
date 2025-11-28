@@ -89,9 +89,9 @@ Copyright © 2025 **UFZ-Helmholtz-Centre for Environmental Research**
 
 ### Citation
 
-If you use this model in your research, please cite:
+This software is archived on Zenodo: [![DOI](https://zenodo.org/badge/1103193816.svg)](https://doi.org/10.5281/zenodo.17749061)
 
-... in review ...
+A publication using this software is in review.
 
 ### Disclaimer
 
