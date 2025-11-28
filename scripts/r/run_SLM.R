@@ -3,7 +3,7 @@
 # =============================================================================
 rm(list = ls())
 
-config_file <- "path\\to\\project\\simulations\\config_example.json"
+config_file <- "path\\to\\project\\simulations\\config_example_small.json"
 
 library(OCNet)
 library(reticulate)
