@@ -349,9 +349,7 @@ def subcatchment_scale_module(
     # SOURCE CONCENTRATION PARAMETERS
     # Immobile concentration correlation to travel time - random heterogeneity
     c_c = 1  # See equation (14), 1 for simplicity
-    mu_w = (
-        sigma_w**2 / 2
-    )  # Unit-mean log-normally distributed random variable (equation 14)
+    mu_w = -sigma_w**2 / 2  # Unit-mean log-normally distributed random variable (equation 14)
 
     # Mean immobile concentration
     mean_c_im_number = param_dict["mean_c_im_number"]  # [mg/L]
@@ -371,7 +369,7 @@ def subcatchment_scale_module(
                 1
                 + np.exp(
                     -logistic_shape
-                    * (np.arange(1, total_simulation_days, 1) - longterm_change_time)
+                    * (np.arange(1, total_simulation_days + 1, 1) - longterm_change_time)
                 )
             )
         ]
@@ -431,7 +429,10 @@ def subcatchment_scale_module(
     number_events = len(all_times[all_times < total_simulation_days])
 
     # Cut vector to correct length and calculate intervals between events
-    interval = np.diff(all_times)[0:number_events].astype(int)
+    interval = np.diff(all_times)  # forward-looking
+    interval = np.insert(interval, 0, all_times[0])  # prepend gap before first event
+    interval = interval[0:number_events].astype(int)
+
     nonzero_times = all_times[0:number_events].astype(int)
     nonzero_rain = df_hydro[0:number_events, 5]
 
@@ -485,7 +486,7 @@ def subcatchment_scale_module(
         -0.5 * (gamma**2 * sigma_ln_time**2 + c_c**2 * sigma_w**2)
         - gamma * mu_ln_time
         - c_c * mu_w
-    )
+    ) # equation (17)
 
     event_timers = nonzero_times + 1
 
