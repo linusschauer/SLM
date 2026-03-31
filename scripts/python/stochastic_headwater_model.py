@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Stochastic Landscape Model (SLM) - Subcatchment-Scale Stochastic Model
+Stochastic Headwater Model (SHM) - part of the Stochastic Landscape Model (SLM).
 
 Implements the stochastic model of Musolff et al. (2017)
 (https://doi.org/10.1002/2017GL072630) for simulating coupled hydrologic
-and biogeochemical responses in catchments.
+and biogeochemical responses at the subcatchment (headwater) scale.
 
 Author: schauer
 Created: Fri Feb 23 09:40:07 2024
@@ -19,7 +19,7 @@ import scipy.stats
 from scipy.stats import expon, lognorm
 
 # Constants
-SPIN_UP_YEARS = 7  # Default spin-up time for subcatchment_scale_module in years
+SPIN_UP_YEARS = 7  # Default spin-up time for stochastic headwater model in years
 DAYS_PER_YEAR = 365  # Days per year
 
 
@@ -28,7 +28,7 @@ DAYS_PER_YEAR = 365  # Days per year
 # ============================================================================
 
 def calculate_cumulative_rainfall_for_event(
-    event_index: int, cumulative_rainfall: np.ndarray, max_time: int
+        event_index: int, cumulative_rainfall: np.ndarray, max_time: int
 ) -> np.ndarray:
     """
     Calculate cumulative rainfall array for a specific event.
@@ -61,14 +61,14 @@ def calculate_cumulative_rainfall_for_event(
         # Calculate incremental rainfall from this event to max_time
         end_index = event_index + max_time
         rainfall_array = (
-            cumulative_rainfall[event_index:end_index]
-            - cumulative_rainfall[event_index - 1]
+                cumulative_rainfall[event_index:end_index]
+                - cumulative_rainfall[event_index - 1]
         )
     return rainfall_array
 
 
 def calculate_event_mass_fractions(
-    cumulative_rainfall: np.ndarray, mu_ln_streamtube: float, sigma_ln_streamtube: float
+        cumulative_rainfall: np.ndarray, mu_ln_streamtube: float, sigma_ln_streamtube: float
 ) -> np.ndarray:
     """
     Calculate mass fractions for distributing solute among future events.
@@ -115,13 +115,15 @@ def calculate_event_mass_fractions(
 # ============================================================================
 
 
-def subcatchment_scale_module(
-    param_dict: Dict[str, Union[float, int]],
+def stochastic_headwater_model(
+        param_dict: Dict[str, Union[float, int]],
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    This function implements the stochastic model described in Musolff et al. (2017)
+    Stochastic Headwater Model (SHM).
+
+    Implements the stochastic model described in Musolff et al. (2017)
     (https://doi.org/10.1002/2017GL072630) to simulate discharge and solute
-    transport in catchments with different solute source distributions.
+    transport in headwater catchments with different solute source distributions.
 
     Parameters
     ----------
@@ -233,11 +235,11 @@ def subcatchment_scale_module(
         "interarrival_time_mean"
     ]  # [d] mean rainfall interarrival time
     lambda_time = (
-        1 / interarrival_time_mean
+            1 / interarrival_time_mean
     )  # [1/days] mean of the rainfall arrival time exponential PDF
     rainfall_mean = rain_per_year / 365 / lambda_time  # [cm/day]
     lambda_intensity = (
-        1 / rainfall_mean
+            1 / rainfall_mean
     )  # [1/cm] mean of the rainfall depth exponential PDF
     ET_max = param_dict["ET_max"]  # [cm/day] potential evapotranspiration
 
@@ -251,7 +253,7 @@ def subcatchment_scale_module(
     theta_res = param_dict["theta_res"]  # [-] residual water content
     soil_storage = z_r * (theta_fc - theta_wp)  # [cm] soil water storage root zone
     soil_storage_vz = z_vz * (
-        theta_fc - theta_wp
+            theta_fc - theta_wp
     )  # [cm] soil water storage entire vadose zone
     R = param_dict["R"]  # Retardation factor (Harman et al. 2011)
     mean_tr = param_dict["mean_tr"]  # [days] hydraulic response time
@@ -261,42 +263,42 @@ def subcatchment_scale_module(
 
     # Dimensionless ratios
     gamma_harman = (
-        soil_storage / rainfall_mean
+            soil_storage / rainfall_mean
     )  # Harman et al. [2011] ratio for root zone
     gamma_harman_vz = (
-        soil_storage_vz / rainfall_mean
+            soil_storage_vz / rainfall_mean
     )  # Harman et al. [2011] ratio for entire vadose zone
     bigF_harman = (theta_fc - theta_res) / (
-        theta_fc - theta_wp
+            theta_fc - theta_wp
     )  # Harman et al. 2011 parameter
     phi = ET_max / rainfall_mean / lambda_time  # Harman et al. [2011] dryness index
 
     # [1/days] mean of the drainage arrival time exponential PDF root zone
     lambda_d = (
-        lambda_time
-        / (
-            scipy.special.gamma(gamma_harman / phi)
-            - scipy.stats.gamma.sf(x=gamma_harman, a=gamma_harman / phi)
-            * scipy.special.gamma(gamma_harman / phi)
-        )
-        * np.exp(-gamma_harman)
-        * gamma_harman ** (gamma_harman / phi)
-        * phi
-        / gamma_harman
+            lambda_time
+            / (
+                    scipy.special.gamma(gamma_harman / phi)
+                    - scipy.stats.gamma.sf(x=gamma_harman, a=gamma_harman / phi)
+                    * scipy.special.gamma(gamma_harman / phi)
+            )
+            * np.exp(-gamma_harman)
+            * gamma_harman ** (gamma_harman / phi)
+            * phi
+            / gamma_harman
     )
 
     # [1/days] mean of the drainage arrival time exponential PDF entire vadose zone
     lambda_d_vz = (
-        lambda_time
-        / (
-            scipy.special.gamma(gamma_harman_vz / phi)
-            - scipy.stats.gamma.sf(x=gamma_harman_vz, a=gamma_harman_vz / phi)
-            * scipy.special.gamma(gamma_harman_vz / phi)
-        )
-        * np.exp(-gamma_harman_vz)
-        * gamma_harman_vz ** (gamma_harman_vz / phi)
-        * phi
-        / gamma_harman_vz
+            lambda_time
+            / (
+                    scipy.special.gamma(gamma_harman_vz / phi)
+                    - scipy.stats.gamma.sf(x=gamma_harman_vz, a=gamma_harman_vz / phi)
+                    * scipy.special.gamma(gamma_harman_vz / phi)
+            )
+            * np.exp(-gamma_harman_vz)
+            * gamma_harman_vz ** (gamma_harman_vz / phi)
+            * phi
+            / gamma_harman_vz
     )
 
     # "Effective gamma" from Harman et al. [2011] entire vadose zone
@@ -306,7 +308,7 @@ def subcatchment_scale_module(
     # Travel time parameters vadose zone (=waiting time)
     # These use "effective gamma" from Harman et al. [2011]
     mean_waiting = (
-        R * bigF_harman * gamma_harman_e_vz / lambda_e_vz
+            R * bigF_harman * gamma_harman_e_vz / lambda_e_vz
     )  # Equation (6), mean travel time vadose zone
 
     # Linear reservoir recession constant, tr (k)
@@ -327,14 +329,14 @@ def subcatchment_scale_module(
     # m1 and m2 based on lambda time vadose zone and lambda time groundwater
     m1_tp = 1 / lambda_g + 1 / lambda_waiting  # Equation (9)
     m2_tp = (
-        2 / lambda_g**2 + 2 / lambda_waiting**2 + 2 / (lambda_g * lambda_waiting)
+            2 / lambda_g ** 2 + 2 / lambda_waiting ** 2 + 2 / (lambda_g * lambda_waiting)
     )  # Equation (10)
 
     # Hyperexponential fit of travel time with LN
     mu_ln_time = 2 * np.log(m1_tp) - np.log(m2_tp) / 2
     sigma_ln_time = (np.log(m2_tp) - 2 * np.log(m1_tp)) ** 0.5
     mean_travel_time = np.exp(
-        mu_ln_time + sigma_ln_time**2 / 2
+        mu_ln_time + sigma_ln_time ** 2 / 2
     )  # Mean total travel time
 
     # Times mean drainage rate, "mean log(streamtube length)": needed for
@@ -345,7 +347,7 @@ def subcatchment_scale_module(
     # SOURCE CONCENTRATION PARAMETERS
     # Immobile concentration correlation to travel time - random heterogeneity
     c_c = 1  # See equation (14), 1 for simplicity
-    mu_w = -sigma_w**2 / 2  # Unit-mean log-normally distributed random variable (equation 14)
+    mu_w = -sigma_w ** 2 / 2  # Unit-mean log-normally distributed random variable (equation 14)
 
     # Mean immobile concentration
     mean_c_im_number = param_dict["mean_c_im_number"]  # [mg/L]
@@ -362,11 +364,11 @@ def subcatchment_scale_module(
         [
             max_c_im
             / (
-                1
-                + np.exp(
-                    -logistic_shape
-                    * (np.arange(1, total_simulation_days + 1, 1) - longterm_change_time)
-                )
+                    1
+                    + np.exp(
+                -logistic_shape
+                * (np.arange(1, total_simulation_days + 1, 1) - longterm_change_time)
+            )
             )
         ]
     )
@@ -462,8 +464,8 @@ def subcatchment_scale_module(
             continue
         else:
             event_discharge[event_start_time:total_simulation_days, events_c] = (
-                float(nonzero_rain[events_c])
-                * unit_hydrograph[1 : total_simulation_days - event_start_time + 1]
+                    float(nonzero_rain[events_c])
+                    * unit_hydrograph[1: total_simulation_days - event_start_time + 1]
             )
 
     # =============================================================================
@@ -474,21 +476,12 @@ def subcatchment_scale_module(
 
     # Event initial mobile concentration after immobile-mobile exchange equation (18)
     event_c_m = mean_c_im[nonzero_times - 1, 0] * (
-        1 - np.exp(-rate_interarrival * interval)
+            1 - np.exp(-rate_interarrival * interval)
     )
 
     # Mean mobile concentration scaling parameter
-    # Original equation (17) included gamma-dependent terms:
-    #   a_c = event_c_m * np.exp(
-    #       -0.5 * (gamma**2 * sigma_ln_time**2 + c_c**2 * sigma_w**2)
-    #       - gamma * mu_ln_time
-    #       - c_c * mu_w
-    #   )
-    # These terms are no longer needed because tau^gamma is normalized to have
-    # discharge-weighted mean of 1 within each recession (see weighted_tau_gamma_mean
-    # below), so a_c only needs to correct for the unstructured heterogeneity W.
     a_c = event_c_m * np.exp(
-        -0.5 * c_c**2 * sigma_w**2
+        -0.5 * c_c ** 2 * sigma_w ** 2
         - c_c * mu_w
     )
 
@@ -498,31 +491,24 @@ def subcatchment_scale_module(
         event_timers[-1] = nonzero_times[-1]
 
     tau_total = np.array(np.arange(1, total_simulation_days + 1))
-    
-    # --- Correction for tau^gamma scale mismatch ---
-    # The scaling parameter a_c (equation 17) is calibrated for tau drawn from the
-    # lognormal travel time distribution (mean ~hundreds to thousands of days).
-    # But in the inner loop, tau^gamma is evaluated at recession indices 1, 2, 3, ...
-    # weighted by exponential discharge decay. Without correction, negative gamma
-    # produces systematically higher concentrations than positive gamma because
-    # a_c overcompensates at short recession times.
-    # Fix: normalize tau^gamma within each recession to have discharge-weighted
-    # mean of 1, so that tau^gamma only controls the *shape* of within-event
-    # concentration (enrichment vs dilution) without affecting the *level*.
+
+    # Weighting of tau**gamma
     h_weights = expon.pdf(tau_total, scale=1 / lambda_tr)
     cumulative_h = np.cumsum(h_weights)
-    cumulative_tau_gamma_h = np.cumsum(tau_total**gamma * h_weights)
+    cumulative_tau_gamma_h = np.cumsum(tau_total ** gamma * h_weights)
     weighted_tau_gamma_mean = cumulative_tau_gamma_h / cumulative_h
 
     # Calculate cumulative rain for each event
     rain_sums = [
-        calculate_cumulative_rainfall_for_event(event_index=xi, cumulative_rainfall=rain_sum, max_time=total_simulation_days)
+        calculate_cumulative_rainfall_for_event(event_index=xi, cumulative_rainfall=rain_sum,
+                                                max_time=total_simulation_days)
         for xi in np.arange(0, number_events)
     ]
 
     # Calculate event fractions for future events for each event
     event_fractions_list = [
-        calculate_event_mass_fractions(cumulative_rainfall=xi, mu_ln_streamtube=mu_ln_tube, sigma_ln_streamtube=sigma_ln_tube)
+        calculate_event_mass_fractions(cumulative_rainfall=xi, mu_ln_streamtube=mu_ln_tube,
+                                       sigma_ln_streamtube=sigma_ln_tube)
         for xi in rain_sums
     ]
 
@@ -551,15 +537,15 @@ def subcatchment_scale_module(
 
         for k in np.arange(events_c, number_events):
             # From time of event k to end of simulation
-            tau = tau_total[0 : (total_simulation_days + 1) - event_timers[k]]
+            tau = tau_total[0: (total_simulation_days + 1) - event_timers[k]]
 
             random_lognorm = r.lognormal(mean=mu_w, sigma=sigma_w, size=len(tau))
-            
+
             c_m_tau_vector = (
-                a_c[events_c]
-                * tau**gamma
-                / weighted_tau_gamma_mean[len(tau) - 1]
-                * random_lognorm**c_c
+                    a_c[events_c]
+                    * tau ** gamma
+                    / weighted_tau_gamma_mean[len(tau) - 1]
+                    * random_lognorm ** c_c
             )
 
             # MOBILE CONCENTRATION
@@ -569,12 +555,12 @@ def subcatchment_scale_module(
             )  # Equation (20)
 
             # Add solute flux to the matrix
-            event_flux[event_timers[k] - 1 : total_simulation_days, events_c] = (
-                event_flux[event_timers[k] - 1 : total_simulation_days, events_c]
-                + c_m_decay_tau_vector
-                * event_discharge[event_timers[k] - 1 : total_simulation_days, k]
-                * event_fractions_shifted[k_count]
-                / df_scaling_summed[k]
+            event_flux[event_timers[k] - 1: total_simulation_days, events_c] = (
+                    event_flux[event_timers[k] - 1: total_simulation_days, events_c]
+                    + c_m_decay_tau_vector
+                    * event_discharge[event_timers[k] - 1: total_simulation_days, k]
+                    * event_fractions_shifted[k_count]
+                    / df_scaling_summed[k]
             )
 
             k_count += 1
