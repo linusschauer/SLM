@@ -6,22 +6,24 @@
 
 ```text
 variland/
-├── 📂 images/                    # example GIF
+├── 📂 images/                             # example GIF
 ├── 📂 river_network/            
-│   ├── OCN_example.RData         # Example river network 
-├── 📂 scripts/                   # Core simulation scripts
+│   ├── OCN_example.RData                   # Example river network 
+├── 📂 scripts/                            # Core simulation scripts
 │   ├── 🐍 python/               
-│   │   ├── functions.py          # Core Python functions
+│   │   ├── functions.py                    # Core Python functions
+│   │   ├── routing.py                      # Routing functions
+│   │   └── stochastic_headwater_model.py   # Headwater model
 │   └── 📊 r/                    
-│       ├── functions.R           # Core R functions
-│       └── run_SLM.R             # simulation runner
-├── 📂 simulations/               # Configuration files
-│   ├── config_example.json       # Example configuration template
-├── 📂 renv/                      # R environment management
-├── 🐳 environment.yml            # Python environment specification
-├── 🔧 run_SLM.sh                 # execution script
-├── 📄 LICENSE                    # License information
-└── 📋 README.md                  # This documentation
+│       ├── functions.R                     # Core R functions
+│       └── run_SLM.R                       # simulation runner
+├── 📂 simulations/                         # Configuration files
+│   ├── config_example.json                 # Example configuration template
+├── 📂 renv/                                # R environment management
+├── 🐳 environment.yml                      # Python environment specification
+├── 🔧 run_SLM.sh                           # execution script
+├── 📄 LICENSE                              # License information
+└── 📋 README.md                            # This documentation
 ```
 
 ## Quick Start
