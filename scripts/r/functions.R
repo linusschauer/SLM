@@ -3,21 +3,13 @@
 # =============================================================================
 
 
-#' Create lookup dictionary mapping river network nodes to their Strahler stream orders
+#' Create lookup vector mapping river network nodes to their Strahler stream orders
 #'
 #' @param OCN River network object
 #'
-#' @return List where each element contains stream order for the corresponding node index
+#' @return Integer vector where element i is the stream order of node i
 get_stream_order_dict <- function(OCN) {
-  # Initialize empty list
-  stream_order_dict <- vector("list", OCN$RN$nNodes[1])
-
-  # Iterate through each river network (RN) node to build the lookup dictionary
-  for (node_index in seq_len(OCN$RN$nNodes[1])) {
-    reach <- OCN$RN$toAGReach[node_index]
-    stream_order_dict[[node_index]] <- OCN$AG$streamOrder[reach]
-  }
-  return(stream_order_dict)
+  OCN$AG$streamOrder[OCN$RN$toAGReach]
 }
 
 
@@ -56,94 +48,112 @@ get_downstream_matrix <- function(OCN) {
 
 #' Finds source nodes and confluence points that mark stream order reach beginnings
 #'
+#' A reach-start is any node of the target stream order that has no same-order
+#' node flowing into it (i.e. it is either a source or a confluence fed only
+#' by lower-order tributaries).
+#'
 #' @param OCN River network object
-#' @param stream_order_node_list List of all nodes in the current stream order
-#' @param stream_order_dict Dictionary mapping nodes to their stream orders
+#' @param stream_order_node_list Integer vector of all nodes in the current stream order
+#' @param stream_order_dict Integer vector mapping nodes to their stream orders
 #' @param stream_order Current stream order being processed
 #'
-#' @return List of upstream boundary nodes (sources and confluences)
+#' @return Integer vector of upstream boundary nodes (sources and confluences)
 get_upstream_node_list <- function(OCN, stream_order_node_list, stream_order_dict, stream_order) {
-  upstream_node_list <- list() # Nodes at start of stream order reaches
-  upstream_node_counter <- 1
+  # Downstream targets of all same-order nodes
+  same_order_targets <- OCN$RN$downNode[stream_order_node_list]
 
-  for (node in stream_order_node_list) {
-    # Find all nodes that flow directly into the current node
-    upstream_nodes <- which(OCN$RN$downNode == node)
-
-    # Case 1: Source node with no upstream connections (first-order streams only)
-    if (length(upstream_nodes) == 0) {
-      upstream_node_list[upstream_node_counter] <- node
-      upstream_node_counter <- upstream_node_counter + 1
-    }
-
-    # Case 2: Confluence node where all upstream tributaries are from different stream orders
-    upstream_stream_orders <- stream_order_dict[upstream_nodes]
-    if (length(upstream_nodes) != 0) {
-      if (all(upstream_stream_orders != stream_order)) {
-        upstream_node_list[upstream_node_counter] <- node
-        upstream_node_counter <- upstream_node_counter + 1
-      }
-    }
-  }
-  return(upstream_node_list)
+  # Reach-starts are same-order nodes that no same-order node flows into
+  stream_order_node_list[!(stream_order_node_list %in% same_order_targets)]
 }
 
 
 #' Collect all nodes belonging to a specific stream order
 #'
-#' @param OCN River network object
-#' @param stream_order_dict Dictionary mapping nodes to their stream orders
+#' @param OCN River network object (unused, retained for API compatibility)
+#' @param stream_order_dict Integer vector mapping nodes to their stream orders
 #' @param stream_order Current stream order being processed
 #'
-#' @return List of node IDs belonging to the specified stream order
+#' @return Integer vector of node IDs belonging to the specified stream order
 get_stream_order_node_list <- function(OCN, stream_order_dict, stream_order) {
-  stream_order_node_counter <- 1
-  stream_order_node_list <- list()
-
-  # Iterate through all river network nodes
-  for (node in 1:OCN$RN$nNodes[1]) {
-    stream_order_node <- stream_order_dict[[node]]
-
-    # Add node to list if it matches target stream order
-    if (stream_order_node == stream_order) {
-      stream_order_node_list[stream_order_node_counter] <- node
-      stream_order_node_counter <- stream_order_node_counter + 1
-    }
-  }
-  return(stream_order_node_list)
+  which(stream_order_dict == stream_order)
 }
 
 
-#' Recursively find all upstream flow direction (FD) nodes
+#' Build upstream adjacency list from flow direction downstream node vector
 #'
-#' @param OCN River network object
-#' @param FD_node Starting flow direction node ID
-#' @param all_upstream_FD_nodes Accumulator vector for upstream node IDs
+#' Pre-computes which FD nodes drain into each FD node, avoiding repeated
+#' linear scans of OCN$FD$downNode during tree traversal.
 #'
-#' @return Vector of all upstream FD node IDs
-get_all_upstream_FD_nodes <- function(OCN,
-                                      FD_node,
-                                      all_upstream_FD_nodes) {
-  # Find all Flow Direction (FD) nodes that drain directly into the current FD node
-  upstream_FD_nodes <- which(OCN$FD$downNode == FD_node)
-
-  all_upstream_FD_nodes <- c(all_upstream_FD_nodes, upstream_FD_nodes)
-
-  if (length(upstream_FD_nodes) == 0) {
-    # Base case: no more upstream nodes found, return complete drainage network
-    return(all_upstream_FD_nodes)
-  } else {
-    for (node_index in seq_along(upstream_FD_nodes)) {
-      current_node <- upstream_FD_nodes[node_index]
-      # Recursively collect all nodes upstream of the current node
-      all_upstream_FD_nodes <- get_all_upstream_FD_nodes(
-        OCN = OCN,
-        FD_node = current_node,
-        all_upstream_FD_nodes = all_upstream_FD_nodes
-      )
+#' @param downNode Integer vector where downNode[i] is the downstream node of node i
+#'
+#' @return List where element [[i]] is an integer vector of nodes draining into node i
+build_upstream_adjacency <- function(downNode) {
+  n <- length(downNode)
+  adj <- vector("list", n)
+  for (i in seq_len(n)) {
+    dn <- downNode[i]
+    if (dn > 0 && dn <= n) {
+      adj[[dn]] <- c(adj[[dn]], i)
     }
   }
-  return(all_upstream_FD_nodes)
+  return(adj)
+}
+
+
+#' Resolve a seed parameter: return the fixed value, or draw a new random seed
+#'
+#' @param seed_value Either "random" (draw a new seed) or a numeric seed to reuse
+#'
+#' @return Integer seed value
+resolve_seed <- function(seed_value) {
+  if (identical(seed_value, "random")) sample(2^16, 1) else seed_value
+}
+
+
+#' Find all upstream flow direction (FD) nodes using iterative traversal
+#'
+#' @param FD_node Starting flow direction node ID
+#' @param upstream_adj Upstream adjacency list (from build_upstream_adjacency)
+#'
+#' @return Integer vector of all upstream FD node IDs
+get_all_upstream_FD_nodes <- function(FD_node, upstream_adj) {
+  # Iterative depth-first traversal using explicit stack
+  stack <- upstream_adj[[FD_node]]
+  if (is.null(stack) || length(stack) == 0) {
+    return(integer(0))
+  }
+
+  result <- vector("list", length(stack))
+  result_count <- 0
+  stack_pos <- length(stack)
+
+  while (stack_pos > 0) {
+    # Pop from stack
+    current <- stack[stack_pos]
+    stack_pos <- stack_pos - 1
+
+    # Collect node
+    result_count <- result_count + 1
+    if (result_count > length(result)) {
+      # Double capacity if needed
+      result <- c(result, vector("list", length(result)))
+    }
+    result[[result_count]] <- current
+
+    # Push upstream neighbors onto stack
+    neighbors <- upstream_adj[[current]]
+    if (!is.null(neighbors) && length(neighbors) > 0) {
+      n_new <- length(neighbors)
+      # Grow stack if needed
+      if (stack_pos + n_new > length(stack)) {
+        stack <- c(stack, integer(n_new * 2))
+      }
+      stack[(stack_pos + 1):(stack_pos + n_new)] <- neighbors
+      stack_pos <- stack_pos + n_new
+    }
+  }
+
+  return(unlist(result[seq_len(result_count)]))
 }
 
 
@@ -153,34 +163,30 @@ get_all_upstream_FD_nodes <- function(OCN,
 #' @param cellsize Grid cell size in meters
 #' @param thresh Area threshold for subcatchment creation
 #' @param landscape_configuration_matrix Matrix of landscape heterogeneity (mean immobile concentration of subcatchments)
-#' @param precip_timing Seed for precipitation timing parameter or "random"
-#' @param precip_intensity Seed for precipitation intensity parameter or "random"
-#' @param traveltime_seed Seed for travel time parameter or "random"
-#' @param fixed_params Fixed model parameters
+#' @param stream_order_dict List mapping node indices to their Strahler stream orders
 #'
-#' @return List containing lateral_inflow_nodes, modified OCN, and random state params
+#' @return List containing lateral_inflow_nodes and modified OCN
 generate_lateral_inflow_nodes <- function(OCN,
                                           cellsize,
                                           thresh,
                                           landscape_configuration_matrix,
-                                          precip_timing,
-                                          precip_intensity,
-                                          traveltime_seed,
-                                          fixed_params) {
+                                          stream_order_dict) {
   # Initialize Flow Direction (FD) grid patches for subcatchment assignment
   OCN$FD$patches <- matrix(0, OCN$FD$nNodes, 1)
   OCN$FD$patches_concentration <- matrix(0, OCN$FD$nNodes, 1)
 
-  stream_order_dict <- get_stream_order_dict(OCN)
-
   # Initialize container for nodes that will receive lateral inflow
-  lateral_inflow_nodes <- list()
+  # Use list with counter to avoid O(N²) from repeated c() calls
+  lateral_inflow_collector <- vector("list", OCN$RN$nNodes[1])
+  lateral_inflow_count <- 0
 
-  upstream <- OCN$RN$upstream
-  upstream <- upstream[sapply(upstream, length) == 1]
+  # Track FD nodes already assigned to subcatchments using logical index
+  # for O(1) lookup and assignment instead of O(N) with %in%
+  is_accounted_for <- logical(OCN$FD$nNodes)
 
-  # Track FD nodes already assigned to subcatchments
-  accounted_for_FD_nodes <- list()
+  # Pre-compute upstream adjacency list for FD tree traversal (O(N) once,
+  # avoids O(N) which() scan per node during traversal)
+  upstream_adj <- build_upstream_adjacency(OCN$FD$downNode)
 
   # Process river network by stream order
   for (stream_order in c(1:max(OCN$AG$streamOrder))) {
@@ -205,17 +211,15 @@ generate_lateral_inflow_nodes <- function(OCN,
       while (next_down_strahler_order == stream_order) {
         # Find corresponding Flow Direction (FD) grid cell for current river node
         FD_node <- OCN$RN$toFD[next_down]
-        upstream_FD_nodes <- list()
 
         # Collect all FD cells that drain to this river node
-        upstream_FD_nodes <- get_all_upstream_FD_nodes(
-          OCN = OCN,
+        upstream_FD_nodes_vec <- get_all_upstream_FD_nodes(
           FD_node = FD_node,
-          all_upstream_FD_nodes = upstream_FD_nodes
+          upstream_adj = upstream_adj
         )
 
         # Subtract FD cells already assigned to other upstream subcatchments
-        upstream_nodes_minus_accounted_for <- upstream_FD_nodes[!upstream_FD_nodes %in% accounted_for_FD_nodes]
+        upstream_nodes_minus_accounted_for <- upstream_FD_nodes_vec[!is_accounted_for[upstream_FD_nodes_vec]]
 
         # Calculate drainage area for potential new subcatchment
         area <- cellsize * cellsize * length(upstream_nodes_minus_accounted_for)
@@ -223,10 +227,11 @@ generate_lateral_inflow_nodes <- function(OCN,
         # Create subcatchment only if drainage area exceeds minimum threshold
         if (area > thresh) {
           # Register this river node as a lateral inflow point
-          lateral_inflow_nodes <- c(lateral_inflow_nodes, next_down)
+          lateral_inflow_count <- lateral_inflow_count + 1
+          lateral_inflow_collector[[lateral_inflow_count]] <- next_down
 
           # Mark all FD cells in this subcatchment as assigned
-          accounted_for_FD_nodes <- c(accounted_for_FD_nodes, upstream_nodes_minus_accounted_for)
+          is_accounted_for[upstream_nodes_minus_accounted_for] <- TRUE
 
           # Get spatial coordinates of the outlet node for this subcatchment
           node_x_position <- OCN$RN$X[next_down] # X coordinate [m]
@@ -240,10 +245,8 @@ generate_lateral_inflow_nodes <- function(OCN,
           mean_c_im_number <- landscape_configuration_matrix[grid_column_index, grid_row_index] # Mean concentration parameter
 
           # Assign subcatchment parameters to all FD cells draining to this river node
-          for (FD_node_acc in upstream_nodes_minus_accounted_for) {
-            OCN$FD$patches[FD_node_acc] <- next_down # Assign outlet node ID
-            OCN$FD$patches_concentration[FD_node_acc] <- mean_c_im_number # Mean concentration
-          }
+          OCN$FD$patches[upstream_nodes_minus_accounted_for] <- next_down
+          OCN$FD$patches_concentration[upstream_nodes_minus_accounted_for] <- mean_c_im_number
         }
 
         # Advance to the next downstream node or handle network outlet
@@ -253,8 +256,9 @@ generate_lateral_inflow_nodes <- function(OCN,
           next_down_strahler_order <- stream_order_dict[[next_down]] # Update stream order for loop control
         } else {
           # Reached network outlet - create final subcatchment and exit while loop
-          lateral_inflow_nodes <- c(lateral_inflow_nodes, next_down)
-          accounted_for_FD_nodes <- c(accounted_for_FD_nodes, upstream_nodes_minus_accounted_for)
+          lateral_inflow_count <- lateral_inflow_count + 1
+          lateral_inflow_collector[[lateral_inflow_count]] <- next_down
+          is_accounted_for[upstream_nodes_minus_accounted_for] <- TRUE
 
           # Extract spatial parameters for the outlet subcatchment
           node_x_position <- OCN$RN$X[next_down] # Outlet X coordinate [m]
@@ -267,10 +271,8 @@ generate_lateral_inflow_nodes <- function(OCN,
           # Extract landscape parameters for outlet subcatchment
           mean_c_im_number <- landscape_configuration_matrix[grid_column_index, grid_row_index] # Mean concentration parameter
 
-          for (FD_node_acc in upstream_nodes_minus_accounted_for) {
-            OCN$FD$patches[FD_node_acc] <- next_down # Assign to outlet node
-            OCN$FD$patches_concentration[FD_node_acc] <- mean_c_im_number # Mean concentration
-          }
+          OCN$FD$patches[upstream_nodes_minus_accounted_for] <- next_down
+          OCN$FD$patches_concentration[upstream_nodes_minus_accounted_for] <- mean_c_im_number
 
           # Assign parameters to the FD cell corresponding to the outlet node itself
           FD_outlet <- OCN$RN$toFD[next_down] # Get FD cell for outlet node
@@ -283,9 +285,12 @@ generate_lateral_inflow_nodes <- function(OCN,
       }
     }
   }
+  # Flatten collected lateral inflow nodes to a vector
+  lateral_inflow_nodes <- unlist(lateral_inflow_collector[seq_len(lateral_inflow_count)])
+
   return(list(
-    lateral_inflow_nodes, # [1] Vector of river nodes receiving lateral inflow from subcatchments
-    OCN # [2] Updated OCN object with FD patch assignments and parameters
+    lateral_inflow_nodes = lateral_inflow_nodes,
+    OCN = OCN
   ))
 }
 
@@ -296,22 +301,16 @@ generate_lateral_inflow_nodes <- function(OCN,
 #' @param downstream_node Target node ID
 #' @param df_nodes_discharge Discharge time series dataframe
 #' @param df_nodes_conc Concentration time series dataframe
-#' @param cellsize Grid cell size in meters
-#' @param vf Mass transfer parameter
-#' @param mannings_n Manning's roughness coefficient
-#' @param side_slope Channel side slope
+#' @param channel_params List with vf, mannings_n, side_slope
 #' @param routing_function_ocn Python routing function
 #'
-#' @return List with routed discharge/concentration dataframes and hydraulic properties
+#' @return Named list: discharge, concentration, depth, celerity
 routing_routine <- function(OCN,
                             upstream_nodes,
                             downstream_node,
                             df_nodes_discharge,
                             df_nodes_conc,
-                            cellsize,
-                            vf,
-                            mannings_n,
-                            side_slope,
+                            channel_params,
                             routing_function_ocn) {
   # Extract time series for all upstream nodes that flow into the downstream target
   df_discharge_upstream_routed <- df_nodes_discharge[, upstream_nodes]
@@ -324,6 +323,11 @@ routing_routine <- function(OCN,
   if (!is.data.frame(df_conc_upstream_routed)) {
     df_conc_upstream_routed <- as.data.frame(df_conc_upstream_routed)
   }
+
+  # Accumulators for flow-weighted hydraulic properties across tributaries
+  weighted_depth_sum <- 0
+  weighted_celerity_sum <- 0
+  total_discharge_weight <- 0
 
   for (node_index in seq_along(upstream_nodes)) {
     # Extract current tributary information for routing calculations
@@ -342,29 +346,42 @@ routing_routine <- function(OCN,
       dx = routing_distance, # Routing distance [m]
       dt_ref = 24, # Reference time step [hours]
       bottom_slope = OCN$RN$slope[upstream_node], # Channel bottom slope [dimensionless]
-      mannings_n = mannings_n, # Manning's roughness coefficient [s/m^(1/3)]
+      mannings_n = channel_params$mannings_n, # Manning's roughness coefficient [s/m^(1/3)]
       reach_length = reach_length, # reach length [m]
       bottom_width_int = OCN$RN$width[upstream_node], # Channel bottom width [m]
-      side_slope = side_slope, # Channel side slope [horizontal:vertical]
-      vf = vf # mass transfer parameter [m/d]
+      side_slope = channel_params$side_slope, # Channel side slope [horizontal:vertical]
+      vf = channel_params$vf # mass transfer parameter [m/d]
     )
 
     # Extract routing outputs from Python function results
     routed_discharge <- routing_results[[1]]
     routed_concentration <- routing_results[[2]]
 
-    median_water_depth <- routing_results[[3]]
-    median_flow_celerity <- routing_results[[4]]
+    # Accumulate flow-weighted hydraulic properties
+    trib_mean_Q <- mean(unlist(routed_discharge))
+    weighted_depth_sum <- weighted_depth_sum + routing_results[[3]] * trib_mean_Q
+    weighted_celerity_sum <- weighted_celerity_sum + routing_results[[4]] * trib_mean_Q
+    total_discharge_weight <- total_discharge_weight + trib_mean_Q
 
     # Store routed time series back into tributary-specific columns
     df_discharge_upstream_routed[, node_index] <- unlist(routed_discharge)
     df_conc_upstream_routed[, node_index] <- unlist(routed_concentration)
   }
+
+  # Compute flow-weighted average hydraulic properties across all tributaries
+  if (total_discharge_weight > 0) {
+    median_water_depth <- weighted_depth_sum / total_discharge_weight
+    median_flow_celerity <- weighted_celerity_sum / total_discharge_weight
+  } else {
+    median_water_depth <- 0
+    median_flow_celerity <- 0
+  }
+
   return(list(
-    df_discharge_upstream_routed, # [1] Routed discharge time series for all tributaries [m3/s]
-    df_conc_upstream_routed, # [2] Routed concentration time series for all tributaries [mg/l]
-    median_water_depth, # [3] Median depth
-    median_flow_celerity # [4] Median celerity
+    discharge = df_discharge_upstream_routed,
+    concentration = df_conc_upstream_routed,
+    depth = median_water_depth,
+    celerity = median_flow_celerity
   ))
 }
 
@@ -391,12 +408,13 @@ mixing_routine <- function(downstream_node,
   # Sum load of all upstream nodes
   df_nodes_load <- base::rowSums(df_nodes_upstream_loads)
 
-  # Calcualte concetration based on load and discharge
-  df_nodes_conc[, downstream_node] <- df_nodes_load / df_nodes_discharge[, downstream_node]
+  # Calculate concentration from load and discharge, guarding against zero-flow timesteps
+  mixed_Q <- df_nodes_discharge[, downstream_node]
+  df_nodes_conc[, downstream_node] <- ifelse(mixed_Q == 0, 0, df_nodes_load / mixed_Q)
 
   return(list(
-    df_nodes_discharge, # [1] Updated discharge time series matrix [m3/s]
-    df_nodes_conc # [2] Updated concentration time series matrix [mg/l]
+    discharge = df_nodes_discharge,
+    concentration = df_nodes_conc
   ))
 }
 
@@ -412,7 +430,7 @@ mixing_routine <- function(downstream_node,
 #' @param fixed_params Fixed model parameters
 #' @param volume_in Volume mass balance input
 #' @param mass_in Mass balance input
-#' @param subcatchment_scale_module Python subcatchment modeling function
+#' @param stochastic_headwater_model Python stochastic headwater model function
 #' @param precip_timing Precipitation timing parameter or "random"
 #' @param precip_intensity Precipitation intensity parameter or "random"
 #' @param traveltime_seed Travel time seed parameter or "random"
@@ -428,7 +446,7 @@ lateral_inflow_routine <- function(OCN,
                                    fixed_params,
                                    volume_in,
                                    mass_in,
-                                   subcatchment_scale_module,
+                                   stochastic_headwater_model,
                                    precip_timing,
                                    precip_intensity,
                                    traveltime_seed) {
@@ -450,56 +468,30 @@ lateral_inflow_routine <- function(OCN,
   mean_c_im_number <- OCN$FD$patches_concentration[FD_node] # Mean concentration parameter [mg/l]
   elevation <- OCN$FD$Z[FD_node] # Elevation at subcatchment outlet [m]
 
-  # Generate random seed for asynchrony parameter
-  rho_seed <- sample(2^16, 1) # Random seed for asynchrony processes
+  # Assemble subcatchment-specific parameters
+  params <- c(list(
+    mean_c_im_number = mean_c_im_number,
+    random_state_times = resolve_seed(precip_timing),
+    random_state_rain = resolve_seed(precip_intensity),
+    real_random = resolve_seed(traveltime_seed),
+    elevation = elevation,
+    rho_seed = sample(2^16, 1)
+  ), fixed_params)
 
-  if (precip_timing == "random") {
-    random_state_times <- sample(2^16, 1)
-  } else {
-    random_state_times <- precip_timing
-  }
+  # Call Python-based stochastic headwater model to generate discharge and concentration time series
+  result <- stochastic_headwater_model(param_dict = params)
 
-  if (precip_intensity == "random") {
-    random_state_rain <- sample(2^16, 1)
-  } else {
-    random_state_rain <- precip_intensity
-  }
-
-  if (traveltime_seed == "random") {
-    real_random <- sample(2^16, 1)
-  } else {
-    real_random <- traveltime_seed
-  }
-
-  params <- list(
-    mean_c_im_number = mean_c_im_number, # Mean concentration parameter
-    random_state_times = random_state_times, # Precipitation timing seed
-    random_state_rain = random_state_rain, # Precipitation intensity seed
-    real_random = real_random, # Travel time seed
-    elevation = elevation, # Subcatchment elevation
-    rho_seed = rho_seed # Asynchrony random seed
-  )
-
-  # Combine subcatchment-specific parameters with fixed hydrological parameters
-  params <- c(params, fixed_params)
-
-  # Call Python-based subcatchment model to generate discharge and concentration time series
-  result <- subcatchment_scale_module(param_dict = params)
-
-  # Extract discharge time series
-  discharge <- result[[1]]
-  discharge <- discharge / 100
-  discharge <- discharge / (24 * 60 * 60)
-  discharge <- discharge * patch_area
+  # Extract and convert discharge time series from SHM output
+  discharge <- convert_shm_discharge(result[[1]], patch_area)
 
   # Accumulate volume input for system-wide mass balance (excluding warm-up period)
   volume_in <- volume_in + sum(discharge[warm_up:length(discharge)] * 3600 * 24) # Convert m3/s to m3/day and sum
 
   concentration <- result[[2]] # Concentration time series [mg/l]
 
-  lateral_inflow <- unlist(lapply(seq_along(lateral_inflow), function(i) lateral_inflow[i] + discharge[i]))
+  lateral_inflow <- discharge
 
-  lateral_load <- unlist(lapply(seq_along(lateral_load), function(i) lateral_load[i] + (discharge[i] * concentration[i])))
+  lateral_load <- discharge * concentration
 
   mass_in <- mass_in + sum(lateral_load[warm_up:length(lateral_load)] * 3600 * 24)
 
@@ -509,85 +501,82 @@ lateral_inflow_routine <- function(OCN,
 
   df_nodes_load <- df_nodes_load + lateral_load
 
-  df_nodes_conc[, node] <- df_nodes_load / df_nodes_discharge[, node]
+  total_Q <- df_nodes_discharge[, node]
+  df_nodes_conc[, node] <- ifelse(total_Q == 0, 0, df_nodes_load / total_Q)
 
   return(list(
-    df_nodes_discharge,
-    df_nodes_conc,
-    volume_in,
-    mass_in
+    discharge = df_nodes_discharge,
+    concentration = df_nodes_conc,
+    volume_in = volume_in,
+    mass_in = mass_in
   ))
 }
 
-#' Recursively populate downstream nodes with routed discharge and concentration
+#' Iteratively populate downstream nodes with routed discharge and concentration
+#'
+#' Walks downstream along a single stream-order reach from the starting node,
+#' applying routing, mixing, and lateral inflow at each step. Terminates when
+#' the reach ends (stream order changes, outlet reached, or downNode == 0).
 #'
 #' @param OCN River network object
-#' @param node Current node ID
+#' @param node Starting node ID
 #' @param df_nodes_discharge Discharge time series dataframe
 #' @param df_nodes_conc Concentration time series dataframe
 #' @param cellsize Grid cell size in meters
-#' @param landscape_configuration_matrix Matrix of landscape heterogeneity (mean immobile concentration of subcatchments)
-#' @param lateral_inflow_nodes Vector of lateral inflow node IDs
+#' @param is_lateral_inflow Logical vector where TRUE indicates node receives lateral inflow
 #' @param tmax_yrs Simulation time in years
 #' @param warm_up Warm-up period
-#' @param vf Mass transfer parameter
-#' @param mannings_n Manning's roughness coefficient
-#' @param side_slope Channel side slope
+#' @param channel_params List with vf, mannings_n, side_slope
 #' @param fixed_params Fixed model parameters
 #' @param volume_in Volume mass balance input
 #' @param mass_in Mass balance input
 #' @param precip_timing Precipitation timing parameter or "random"
 #' @param precip_intensity Precipitation intensity parameter or "random"
 #' @param traveltime_seed Travel time seed parameter or "random"
-#' @param subcatchment_scale_module Python subcatchment modeling function
+#' @param stochastic_headwater_model Python stochastic headwater model function
 #' @param routing_function_ocn Python routing function
 #' @param depth_dict Dictionary for storing hydraulic depth properties
 #' @param celerity_dict Dictionary for storing hydraulic celerity properties
+#' @param stream_order_dict Integer vector mapping node indices to their Strahler stream orders
 #'
-#' @return List with updated time series, mass balance, and hydraulic dictionaries
+#' @return Named list: discharge, concentration, volume_in, mass_in, depth_dict, celerity_dict
 populate_downstream <- function(OCN,
                                 node,
                                 df_nodes_discharge,
                                 df_nodes_conc,
                                 cellsize,
-                                landscape_configuration_matrix,
-                                lateral_inflow_nodes,
+                                is_lateral_inflow,
                                 tmax_yrs,
                                 warm_up,
-                                vf,
-                                mannings_n,
-                                side_slope,
+                                channel_params,
                                 fixed_params,
                                 volume_in,
                                 mass_in,
                                 precip_timing,
                                 precip_intensity,
                                 traveltime_seed,
-                                subcatchment_scale_module,
+                                stochastic_headwater_model,
                                 routing_function_ocn,
                                 depth_dict,
-                                celerity_dict) {
-  # Get lookup dictionary mapping river network (RN) nodes to their Strahler stream orders
-  stream_order_dict <- get_stream_order_dict(OCN)
+                                celerity_dict,
+                                stream_order_dict) {
+  current_node <- node
+  stream_order_current <- stream_order_dict[[current_node]]
 
-  # Identify the immediate downstream node from current position
-  downstream_node <- OCN$RN$downNode[node]
+  while (TRUE) {
+    downstream_node <- OCN$RN$downNode[current_node]
 
-  if (downstream_node != 0) {
-    stream_order_node <- stream_order_dict[[node]]
-    stream_order_downstream <- stream_order_dict[[downstream_node]]
+    # Stop at network outlet
+    if (downstream_node == 0) break
 
-    # Terminate recursion if downstream node belongs to different stream order
-    if (stream_order_node != stream_order_downstream) {
-      result_list <- list(df_nodes_discharge, df_nodes_conc, volume_in, mass_in, depth_dict, celerity_dict)
-      return(result_list)
-    }
+    # Stop at stream order boundary
+    if (stream_order_dict[[downstream_node]] != stream_order_current) break
 
     # Identify all nodes that flow directly into the downstream target node
     upstream_nodes <- which(OCN$RN$downNode == downstream_node)
 
     # Filter upstream nodes to include only those of equal or lower stream order
-    upstream_nodes <- upstream_nodes[stream_order_dict[upstream_nodes] <= stream_order_node]
+    upstream_nodes <- upstream_nodes[stream_order_dict[upstream_nodes] <= stream_order_current]
 
     result_routing <- routing_routine(
       OCN = OCN,
@@ -595,21 +584,16 @@ populate_downstream <- function(OCN,
       downstream_node = downstream_node,
       df_nodes_discharge = df_nodes_discharge,
       df_nodes_conc = df_nodes_conc,
-      cellsize = cellsize,
-      vf = vf,
-      mannings_n = mannings_n,
-      side_slope = side_slope,
+      channel_params = channel_params,
       routing_function_ocn = routing_function_ocn
     )
 
     # Extract hydraulic routing results
-    df_discharge_upstream_routed <- result_routing[[1]]
-    df_conc_upstream_routed <- result_routing[[2]]
-    median_depth <- result_routing[[3]]
-    median_celerity <- result_routing[[4]]
+    df_discharge_upstream_routed <- result_routing$discharge
+    df_conc_upstream_routed <- result_routing$concentration
 
-    depth_dict[downstream_node] <- median_depth
-    celerity_dict[downstream_node] <- median_celerity
+    depth_dict[downstream_node] <- result_routing$depth
+    celerity_dict[downstream_node] <- result_routing$celerity
 
     result_mixing <- mixing_routine(
       downstream_node = downstream_node,
@@ -619,11 +603,11 @@ populate_downstream <- function(OCN,
       df_nodes_conc = df_nodes_conc
     )
 
-    df_nodes_discharge <- result_mixing[[1]] # Updated discharge matrix
-    df_nodes_conc <- result_mixing[[2]] # Updated concentration matrix
+    df_nodes_discharge <- result_mixing$discharge
+    df_nodes_conc <- result_mixing$concentration
 
     # Check if downstream node receives lateral inflow from surrounding landscape
-    if (downstream_node %in% lateral_inflow_nodes) {
+    if (is_lateral_inflow[downstream_node]) {
       result_lateral <- lateral_inflow_routine(
         OCN = OCN,
         df_nodes_discharge = df_nodes_discharge,
@@ -635,74 +619,48 @@ populate_downstream <- function(OCN,
         fixed_params = fixed_params,
         volume_in = volume_in,
         mass_in = mass_in,
-        subcatchment_scale_module = subcatchment_scale_module,
+        stochastic_headwater_model = stochastic_headwater_model,
         precip_timing,
         precip_intensity,
         traveltime_seed
       )
 
-      # Update time series and mass balance with lateral contributions
-      df_nodes_discharge <- result_lateral[[1]]
-      df_nodes_conc <- result_lateral[[2]]
-      volume_in <- result_lateral[[3]]
-      mass_in <- result_lateral[[4]]
+      df_nodes_discharge <- result_lateral$discharge
+      df_nodes_conc <- result_lateral$concentration
+      volume_in <- result_lateral$volume_in
+      mass_in <- result_lateral$mass_in
     }
 
-    # Continue processing further downstream if not at network outlet
-    if (OCN$RN$downNode[downstream_node] != 0) {
-      # Recursively call this function to continue processing downstream
-      result_pop_down <- populate_downstream(
-        OCN = OCN,
-        node = downstream_node, # Start from current downstream node
-        df_nodes_discharge = df_nodes_discharge,
-        df_nodes_conc = df_nodes_conc,
-        cellsize = cellsize,
-        landscape_configuration_matrix = landscape_configuration_matrix,
-        lateral_inflow_nodes = lateral_inflow_nodes,
-        tmax_yrs = tmax_yrs,
-        warm_up = warm_up,
-        vf = vf,
-        mannings_n = mannings_n,
-        side_slope = side_slope,
-        fixed_params = fixed_params,
-        volume_in = volume_in, # Pass updated mass balance
-        mass_in = mass_in,
-        precip_timing = precip_timing,
-        precip_intensity = precip_intensity,
-        traveltime_seed = traveltime_seed,
-        subcatchment_scale_module = subcatchment_scale_module,
-        routing_function_ocn = routing_function_ocn,
-        depth_dict = depth_dict, # Pass hydraulic property storage
-        celerity_dict = celerity_dict
-      )
-
-      # Extract results from recursive call
-      df_nodes_discharge <- result_pop_down[[1]]
-      df_nodes_conc <- result_pop_down[[2]]
-      volume_in <- result_pop_down[[3]]
-      mass_in <- result_pop_down[[4]]
-      depth_dict <- result_pop_down[[5]]
-      celerity_dict <- result_pop_down[[6]]
-    }
+    # Advance to next node in reach
+    current_node <- downstream_node
   }
 
-  result_list <- list(
-    df_nodes_discharge,
-    df_nodes_conc,
-    volume_in,
-    mass_in,
-    depth_dict,
-    celerity_dict
-  )
-
-  return(result_list)
+  return(list(
+    discharge = df_nodes_discharge,
+    concentration = df_nodes_conc,
+    volume_in = volume_in,
+    mass_in = mass_in,
+    depth_dict = depth_dict,
+    celerity_dict = celerity_dict
+  ))
 }
 
 
 #' Create matrix of the subcatchment immobile concentration based on gamma_ls and sigma_w_ls
 #'
+#' For each grid cell with a nonzero downstream path length, computes
+#' C_im = d_eff^|gamma_ls| * W, where W ~ Lognormal with E[W] = 1.
+#'
+#' When gamma_ls >= 0, d_eff = distance (concentration increases with path length).
+#' When gamma_ls <  0, d_eff = d_max + d_min - distance (concentration decreases
+#' with path length, mirroring the positive-gamma curvature).
+#'
+#' The resulting matrix is then rescaled so the mean of nonzero cells
+#' equals overall_mean_concentration.
+#'
 #' @param df_downstream_path Network topology dataframe
-#' @param gamma_ls Network-wide scaling parameter
+#' @param gamma_ls Network-wide scaling parameter (sign controls direction,
+#'   magnitude controls curvature)
 #' @param sigma_w_ls Network-wide variability parameter
 #' @param overall_mean_concentration Overall mean concentration value
 #'
@@ -712,60 +670,371 @@ generate_landscape_configuration <- function(
     gamma_ls,
     sigma_w_ls,
     overall_mean_concentration) {
-  grid_width_cells <- nrow(df_downstream_path)
-  grid_height_cells <- ncol(df_downstream_path)
+  landscape_configuration_matrix <- matrix(0, nrow = nrow(df_downstream_path), ncol = ncol(df_downstream_path))
 
-  landscape_configuration_matrix <- matrix(0, nrow = grid_width_cells, ncol = grid_height_cells)
+  # Identify nonzero cells (cells that belong to the network)
+  nonzero_mask <- df_downstream_path != 0
+  n_nonzero <- sum(nonzero_mask)
 
-  mean_conc_list <- c()
-
-  for (row_index in 1:grid_width_cells) {
-    for (col_index in 1:grid_height_cells) {
-      if (df_downstream_path[row_index, col_index] != 0) {
-        mean_c <- calc_c_immobile(df_downstream_path[row_index, col_index], gamma_ls, sigma_w_ls)
-        landscape_configuration_matrix[row_index, col_index] <- mean_c
-        mean_conc_list <- c(mean_conc_list, landscape_configuration_matrix[row_index, col_index])
-      }
-    }
+  # Compute effective distance: reverse axis for negative gamma
+  distances <- df_downstream_path[nonzero_mask]
+  if (gamma_ls < 0) {
+    d_eff <- max(distances) + min(distances) - distances
+  } else {
+    d_eff <- distances
   }
 
-  # Calculate scaling factor to achieve target mean concentration
-  calc_mean_conc <- mean(mean_conc_list)
+  # C_im = d_eff^|gamma| * W, where W is unit-mean lognormal
+  W <- rlnorm(n_nonzero, meanlog = -sigma_w_ls^2 / 2, sdlog = sigma_w_ls)
+  landscape_configuration_matrix[nonzero_mask] <- (d_eff^abs(gamma_ls)) * W
+
+  # Rescale to achieve target mean concentration
+  calc_mean_conc <- mean(landscape_configuration_matrix[nonzero_mask])
   scaling_factor <- overall_mean_concentration / calc_mean_conc
+  landscape_configuration_matrix[nonzero_mask] <- landscape_configuration_matrix[nonzero_mask] * scaling_factor
 
-  # Apply scaling factor to all concentration parameters
-  for (row_index in 1:grid_width_cells) {
-    for (col_index in 1:grid_height_cells) {
-      if (df_downstream_path[row_index, col_index] != 0) {
-        # Scale concentration to match target overall mean
-        landscape_configuration_matrix[row_index, col_index] <- landscape_configuration_matrix[row_index, col_index] * scaling_factor
-      }
-    }
-  }
   return(landscape_configuration_matrix)
 }
 # ===== END OF generate_landscape_configuration FUNCTION =====
 
 
-#' Calculate immobile zone concentration based on flow distance
+#' Convert SHM discharge output to volumetric discharge
 #'
-#' @param distance Downstream path length
-#' @param gamma_ls Scaling exponent parameter
-#' @param sigma_w_ls Log-normal standard deviation parameter
+#' The stochastic headwater model returns discharge as specific discharge
+#' in [cm/day]. This function converts to volumetric discharge [m³/s].
 #'
-#' @return Numeric concentration value
-calc_c_immobile <- function(distance, gamma_ls, sigma_w_ls) {
-  # Generate random variability from log-normal distribution
-  random_variable <- rlnorm(1, meanlog = 0, sdlog = sigma_w_ls)
-
-  c_im <- (distance^gamma_ls) * random_variable
-
-  return(c_im)
+#' @param discharge_cm_day Specific discharge from SHM [cm/day]
+#' @param area Drainage area [m²]
+#'
+#' @return Volumetric discharge [m³/s]
+convert_shm_discharge <- function(discharge_cm_day, area) {
+  discharge_m_day <- discharge_cm_day / 100       # cm/day → m/day
+  discharge_m_s <- discharge_m_day / (24 * 60 * 60) # m/day → m/s
+  discharge_m3_s <- discharge_m_s * area           # m/s × m² → m³/s
+  return(discharge_m3_s)
 }
-# ===== END OF calc_c_immobile FUNCTION =====
 
 
-#' Main function to run the stochastic landscape model
+#' Initialize simulation: load OCN, build spatial lookups, delineate subcatchments,
+#' allocate time series matrices.
+#'
+#' @param network OCN file path identifier (format: "X_Y_threshold_identifier")
+#' @param path_to_OCN Path to OCN .RData file
+#' @param gamma_ls Network-scale scaling parameter
+#' @param sigma_w_ls Network-scale variability parameter
+#' @param overall_mean_concentration Target mean immobile concentration
+#' @param tmax_yrs Simulation time in years
+#'
+#' @return Named list with OCN, spatial lookups, time series matrices, and seed config
+setup_simulation <- function(network, path_to_OCN, gamma_ls, sigma_w_ls,
+                             overall_mean_concentration, tmax_yrs) {
+  load(glue(path_to_OCN))
+  cellsize <- OCN$cellsize
+
+  subcatchment_area_treshold <- as.numeric(strsplit(network, "_")[[1]][3])
+  thresh <- subcatchment_area_treshold * cellsize^2
+
+  stream_order_dict <- get_stream_order_dict(OCN)
+  df_downstream_path <- get_downstream_matrix(OCN)
+
+  landscape_configuration_matrix <- generate_landscape_configuration(
+    df_downstream_path = df_downstream_path,
+    gamma_ls = gamma_ls,
+    sigma_w_ls = sigma_w_ls,
+    overall_mean_concentration = overall_mean_concentration
+  )
+
+  result <- generate_lateral_inflow_nodes(
+    OCN = OCN,
+    cellsize = cellsize,
+    thresh = thresh,
+    landscape_configuration_matrix = landscape_configuration_matrix,
+    stream_order_dict = stream_order_dict
+  )
+  OCN <- result$OCN
+
+  # Identify headwater (source) nodes: nodes with no upstream connections
+  upstream <- OCN$RN$upstream
+  upstream <- upstream[sapply(upstream, length) == 1]
+
+  # Remove headwater nodes from lateral inflow to avoid double-counting
+  lateral_inflow_nodes <- setdiff(result$lateral_inflow_nodes, upstream)
+  is_lateral_inflow <- logical(OCN$RN$nNodes[1])
+  is_lateral_inflow[lateral_inflow_nodes] <- TRUE
+
+  # Allocate time series matrices
+  n_nodes <- OCN$RN$nNodes[1]
+  n_days <- tmax_yrs * 365
+  df_nodes_conc <- data.frame(matrix(NA, nrow = n_days, ncol = n_nodes))
+  df_nodes_discharge <- data.frame(matrix(NA, nrow = n_days, ncol = n_nodes))
+  colnames(df_nodes_conc) <- seq_len(n_nodes)
+  colnames(df_nodes_discharge) <- seq_len(n_nodes)
+
+  return(list(
+    OCN = OCN,
+    cellsize = cellsize,
+    stream_order_dict = stream_order_dict,
+    is_lateral_inflow = is_lateral_inflow,
+    upstream = upstream,
+    depth_dict = matrix(0, n_nodes, 1),
+    celerity_dict = matrix(0, n_nodes, 1),
+    precip_timing = sample(2^16, 1),
+    precip_intensity = sample(2^16, 1),
+    traveltime_seed = "random",
+    df_nodes_conc = df_nodes_conc,
+    df_nodes_discharge = df_nodes_discharge
+  ))
+}
+
+
+#' Generate discharge and concentration time series for all headwater nodes
+#'
+#' @param OCN River network object
+#' @param upstream List of headwater node IDs
+#' @param df_nodes_discharge Discharge time series matrix (modified in place)
+#' @param df_nodes_conc Concentration time series matrix (modified in place)
+#' @param fixed_params Fixed hydrological parameters for the SHM
+#' @param precip_timing Precipitation timing seed or "random"
+#' @param precip_intensity Precipitation intensity seed or "random"
+#' @param traveltime_seed Travel time seed or "random"
+#' @param warm_up Warm-up period in days
+#' @param stochastic_headwater_model Python SHM function
+#'
+#' @return Named list: discharge, concentration, volume_in, mass_in
+generate_headwater_timeseries <- function(OCN, upstream,
+                                          df_nodes_discharge, df_nodes_conc,
+                                          fixed_params,
+                                          precip_timing, precip_intensity, traveltime_seed,
+                                          warm_up,
+                                          stochastic_headwater_model) {
+  volume_in <- 0
+  mass_in <- 0
+
+  pb <- progress_bar$new(
+    format = "  Creating headwater time series [:bar] :percent eta: :eta",
+    total = length(upstream), clear = FALSE, width = 60
+  )
+
+  for (upstream_index in seq_along(upstream)) {
+    pb$tick()
+    upstream_node <- upstream[[upstream_index]]
+
+    FD_node <- OCN$RN$toFD[upstream_node]
+    upstream_area <- OCN$RN$A[upstream_node]
+    mean_c_im_number <- OCN$FD$patches_concentration[FD_node]
+    elevation <- OCN$FD$Z[FD_node]
+
+    params <- c(list(
+      mean_c_im_number = mean_c_im_number,
+      random_state_times = resolve_seed(precip_timing),
+      random_state_rain = resolve_seed(precip_intensity),
+      real_random = resolve_seed(traveltime_seed),
+      elevation = elevation,
+      rho_seed = sample(2^16, 1)
+    ), fixed_params)
+
+    result <- stochastic_headwater_model(param_dict = params)
+
+    discharge <- convert_shm_discharge(result[[1]], upstream_area)
+    concentration <- result[[2]]
+    concentration[is.nan(concentration)] <- mean(concentration, na.rm = TRUE)
+
+    volume_in <- volume_in + sum(discharge[warm_up:length(discharge)] * 3600 * 24)
+    mass_in <- mass_in + sum(discharge[warm_up:length(discharge)] * 3600 * 24 *
+                               concentration[warm_up:length(concentration)])
+
+    df_nodes_conc[, upstream_node] <- concentration
+    df_nodes_discharge[, upstream_node] <- discharge
+  }
+
+  return(list(
+    discharge = df_nodes_discharge,
+    concentration = df_nodes_conc,
+    volume_in = volume_in,
+    mass_in = mass_in
+  ))
+}
+
+
+#' Route flows through the network by Strahler stream order
+#'
+#' Processes confluences (route + mix + lateral inflow) then propagates
+#' each reach downstream via populate_downstream, for each stream order
+#' from 1 to max.
+#'
+#' @param OCN River network object
+#' @param stream_order_dict Integer vector mapping nodes to Strahler orders
+#' @param df_nodes_discharge Discharge time series matrix
+#' @param df_nodes_conc Concentration time series matrix
+#' @param is_lateral_inflow Logical vector for lateral inflow nodes
+#' @param depth_dict Hydraulic depth storage matrix
+#' @param celerity_dict Hydraulic celerity storage matrix
+#' @param volume_in Cumulative volume input (from headwater phase)
+#' @param mass_in Cumulative mass input (from headwater phase)
+#' @param cellsize Grid cell size in meters
+#' @param tmax_yrs Simulation time in years
+#' @param warm_up Warm-up period in days
+#' @param channel_params List with vf, mannings_n, side_slope
+#' @param fixed_params Fixed hydrological parameters for the SHM
+#' @param precip_timing Precipitation timing seed or "random"
+#' @param precip_intensity Precipitation intensity seed or "random"
+#' @param traveltime_seed Travel time seed or "random"
+#' @param stochastic_headwater_model Python SHM function
+#' @param routing_function_ocn Python routing function
+#'
+#' @return Named list: discharge, concentration, volume_in, mass_in, depth_dict, celerity_dict
+route_network <- function(OCN, stream_order_dict,
+                          df_nodes_discharge, df_nodes_conc,
+                          is_lateral_inflow, depth_dict, celerity_dict,
+                          volume_in, mass_in,
+                          cellsize, tmax_yrs, warm_up,
+                          channel_params, fixed_params,
+                          precip_timing, precip_intensity, traveltime_seed,
+                          stochastic_headwater_model, routing_function_ocn) {
+  for (stream_order in seq_len(max(OCN$AG$streamOrder))) {
+    stream_order_node_list <- get_stream_order_node_list(OCN, stream_order_dict, stream_order)
+    upstream_node_list <- get_upstream_node_list(OCN, stream_order_node_list, stream_order_dict, stream_order)
+
+    # Process confluences for higher-order streams
+    if (stream_order > 1) {
+      for (node in upstream_node_list) {
+        upstream_nodes <- which(OCN$RN$downNode == node)
+
+        result_routing <- routing_routine(
+          OCN = OCN,
+          upstream_nodes = upstream_nodes,
+          downstream_node = node,
+          df_nodes_discharge = df_nodes_discharge,
+          df_nodes_conc = df_nodes_conc,
+          channel_params = channel_params,
+          routing_function_ocn = routing_function_ocn
+        )
+
+        depth_dict[node] <- result_routing$depth
+        celerity_dict[node] <- result_routing$celerity
+
+        result_mixing <- mixing_routine(
+          downstream_node = node,
+          df_discharge_upstream_routed = result_routing$discharge,
+          df_conc_upstream_routed = result_routing$concentration,
+          df_nodes_discharge = df_nodes_discharge,
+          df_nodes_conc = df_nodes_conc
+        )
+
+        df_nodes_discharge <- result_mixing$discharge
+        df_nodes_conc <- result_mixing$concentration
+
+        if (is_lateral_inflow[node]) {
+          result_lateral <- lateral_inflow_routine(
+            OCN = OCN,
+            df_nodes_discharge = df_nodes_discharge,
+            df_nodes_conc = df_nodes_conc,
+            node = node,
+            cellsize = cellsize,
+            tmax_yrs = tmax_yrs,
+            warm_up = warm_up,
+            fixed_params = fixed_params,
+            volume_in = volume_in,
+            mass_in = mass_in,
+            stochastic_headwater_model = stochastic_headwater_model,
+            precip_timing,
+            precip_intensity,
+            traveltime_seed
+          )
+
+          df_nodes_discharge <- result_lateral$discharge
+          df_nodes_conc <- result_lateral$concentration
+          volume_in <- result_lateral$volume_in
+          mass_in <- result_lateral$mass_in
+        }
+      }
+    }
+
+    # Propagate each reach downstream
+    pb <- progress_bar$new(
+      format = glue("  Calculating stream order: {stream_order} [:bar] :percent eta: :eta"),
+      total = length(upstream_node_list), clear = FALSE, width = 60
+    )
+    for (node in upstream_node_list) {
+      pb$tick()
+
+      result_pop_down <- populate_downstream(
+        OCN = OCN,
+        node = node,
+        df_nodes_discharge = df_nodes_discharge,
+        df_nodes_conc = df_nodes_conc,
+        cellsize = cellsize,
+        is_lateral_inflow = is_lateral_inflow,
+        tmax_yrs = tmax_yrs,
+        warm_up = warm_up,
+        channel_params = channel_params,
+        fixed_params = fixed_params,
+        volume_in = volume_in,
+        mass_in = mass_in,
+        precip_timing = precip_timing,
+        precip_intensity = precip_intensity,
+        traveltime_seed = traveltime_seed,
+        stochastic_headwater_model = stochastic_headwater_model,
+        routing_function_ocn = routing_function_ocn,
+        depth_dict = depth_dict,
+        celerity_dict = celerity_dict,
+        stream_order_dict = stream_order_dict
+      )
+      df_nodes_discharge <- result_pop_down$discharge
+      df_nodes_conc <- result_pop_down$concentration
+      volume_in <- result_pop_down$volume_in
+      mass_in <- result_pop_down$mass_in
+      depth_dict <- result_pop_down$depth_dict
+      celerity_dict <- result_pop_down$celerity_dict
+    }
+  }
+
+  return(list(
+    discharge = df_nodes_discharge,
+    concentration = df_nodes_conc,
+    volume_in = volume_in,
+    mass_in = mass_in,
+    depth_dict = depth_dict,
+    celerity_dict = celerity_dict
+  ))
+}
+
+
+#' Write simulation outputs to disk
+#'
+#' Trims warm-up period from time series and writes all output files.
+#'
+#' @param df_nodes_conc Concentration time series matrix
+#' @param df_nodes_discharge Discharge time series matrix
+#' @param OCN River network object
+#' @param depth_dict Hydraulic depth matrix
+#' @param celerity_dict Hydraulic celerity matrix
+#' @param df_params Parameter record dataframe
+#' @param warm_up Warm-up period in days
+#' @param tmax_yrs Simulation time in years
+#' @param path_to_output Output directory path
+#' @param simulation_identifier Unique simulation ID
+write_simulation_output <- function(df_nodes_conc, df_nodes_discharge,
+                                    OCN, depth_dict, celerity_dict,
+                                    df_params, warm_up, tmax_yrs,
+                                    path_to_output, simulation_identifier) {
+  # Trim warm-up period
+  df_nodes_conc <- as.data.frame(df_nodes_conc[warm_up:(tmax_yrs * 365)-1, ])
+  df_nodes_discharge <- as.data.frame(df_nodes_discharge[warm_up:(tmax_yrs * 365)-1, ])
+
+  write_parquet(df_params, file.path(path_to_output, glue("data/{simulation_identifier}_params.parquet")))
+  write_parquet(df_nodes_conc, file.path(path_to_output, glue("data/{simulation_identifier}_conc_wide.parquet")))
+  write_parquet(df_nodes_discharge, file.path(path_to_output, glue("data/{simulation_identifier}_discharge_wide.parquet")))
+  save(OCN, file = file.path(path_to_output, glue("data/{simulation_identifier}_OCN.RData")))
+  saveRDS(depth_dict, file.path(path_to_output, glue("data/{simulation_identifier}_depth_dict.rds")))
+  saveRDS(celerity_dict, file.path(path_to_output, glue("data/{simulation_identifier}_celerity_dict.rds")))
+}
+
+
+#' Main orchestrator for the stochastic landscape model
+#'
+#' Coordinates setup, headwater generation, network routing, diagnostics,
+#' and output writing. Called from parallel dispatch (doFuture).
 #'
 #' @param network OCN file path identifier
 #' @param gamma_sc Subcatchment biogeochemical scaling parameter
@@ -804,7 +1073,7 @@ calc_c_immobile <- function(distance, gamma_ls, sigma_w_ls) {
 #' @param path_to_output Output directory path
 #' @param log_warning_parallel Parallel processing warning log
 #'
-#' @return Void (saves results to files)
+#' @return NULL (saves results to files)
 run_SLM <- function(network,
                     gamma_sc,
                     sigma_w_sc,
@@ -841,369 +1110,109 @@ run_SLM <- function(network,
                     path_to_OCN,
                     path_to_output,
                     log_warning_parallel) {
-  # Initialize mass and volume balance tracking variables
-  volume_in <- 0
-  volume_out <- 0
-  mass_in <- 0
-  mass_out <- 0
-
-  # Configure progress bar display based on user preference
   options(progress_enabled = print_progress)
-
-  # Setup Python environment
   use_python(path_to_python)
   source_python(path_to_python_functions)
 
-  # Load the Optimal Channel Network (OCN) object from file
-  load(glue(path_to_OCN))
+  # --- Setup ---
+  sim <- setup_simulation(network, path_to_OCN, gamma_ls, sigma_w_ls,
+                          overall_mean_concentration, tmax_yrs)
 
-  cellsize <- OCN$cellsize
+  channel_params <- list(vf = vf, mannings_n = mannings_n, side_slope = side_slope)
 
-  # Network name format: "X_Y_threshold_identifier"
-  subcatchment_area_treshold <- as.numeric(strsplit(network, "_")[[1]][3])
-
-  thresh <- subcatchment_area_treshold * cellsize^2
-
-  stream_order_dict <- get_stream_order_dict(OCN)
-
-  # Spatial grid matrix to store downstream path lengths to outlet
-  df_downstream_path <- get_downstream_matrix(OCN)
-
-  # Generate matrix with immobile concentrations based on parameters gamma_ls and sigma_w_ls
-  landscape_configuration_matrix <- generate_landscape_configuration(
-    df_downstream_path = df_downstream_path,
-    gamma_ls = gamma_ls,
-    sigma_w_ls = sigma_w_ls,
-    overall_mean_concentration = overall_mean_concentration
+  fixed_params <- list(
+    gamma_sc = gamma_sc, sigma_w_sc = sigma_w_sc, oro_scaling = oro_scaling,
+    tmax_yrs = tmax_yrs, rho = rho, damkohler_transport = damkohler_transport,
+    damkohler_interarrival = damkohler_interarrival,
+    damkohler_longterm = damkohler_longterm,
+    interarrival_time_mean = interarrival_time_mean,
+    ET_max = ET_max, z_r = z_r, z_vz = z_vz,
+    theta_fc = theta_fc, theta_wp = theta_wp, theta_res = theta_res,
+    R = R, mean_tr = mean_tr, theta_sat = theta_sat,
+    aquifer_z = aquifer_z, rain_per_year = rain_per_year
   )
 
-  depth_dict <- matrix(0, OCN$RN$nNodes, 1) # Median water depths [m]
-  celerity_dict <- matrix(0, OCN$RN$nNodes, 1) # Median flow celerities [m/s]
-
-  # Configure random seed usage based on hydroclimatic scenario:
-  precip_timing <- sample(2^16, 1) # Fixed seed for precipitation timing
-  precip_intensity <- sample(2^16, 1) # Fixed seed for precipitation intensity
-  traveltime_seed <- "random"
-
-
-  # Generate lateral inflow nodes based on area threshold
-  result <- generate_lateral_inflow_nodes(
-    OCN = OCN,
-    cellsize = cellsize,
-    thresh = thresh,
-    landscape_configuration_matrix = landscape_configuration_matrix,
-    precip_timing = precip_timing,
-    precip_intensity = precip_intensity,
-    traveltime_seed = traveltime_seed,
-    fixed_params = fixed_params
-  )
-  lateral_inflow_nodes <- result[[1]] # List of nodes receiving lateral inflow
-  OCN <- result[[2]] # Updated OCN with immobile concentration assigned to subcatchments
-
-
-  # Identify headwater (source) nodes: nodes with no upstream connections
-  upstream <- OCN$RN$upstream
-  upstream <- upstream[sapply(upstream, length) == 1]
-
-  # Remove headwater nodes from lateral inflow nodes to avoid double-counting
-  lateral_inflow_nodes <- setdiff(lateral_inflow_nodes, upstream)
-
-  df_nodes_conc <- data.frame(matrix(NA, nrow = (tmax_yrs * 365), ncol = OCN$RN$nNodes[1]))
-  df_nodes_discharge <- data.frame(matrix(NA, nrow = (tmax_yrs * 365), ncol = OCN$RN$nNodes[1]))
-
-  # Set column names to correspond to node IDs
-  colnames(df_nodes_conc) <- 1:OCN$RN$nNodes[1]
-  colnames(df_nodes_discharge) <- 1:OCN$RN$nNodes[1]
-
-
-  # Generate concentration and discharge time series for all headwater nodes
-  pb <- progress_bar$new(
-    format = "  Creating headwater time series [:bar] :percent eta: :eta",
-    total = length(upstream), clear = FALSE, width = 60
+  # --- Generate headwater time series ---
+  hw <- generate_headwater_timeseries(
+    OCN = sim$OCN, upstream = sim$upstream,
+    df_nodes_discharge = sim$df_nodes_discharge,
+    df_nodes_conc = sim$df_nodes_conc,
+    fixed_params = fixed_params,
+    precip_timing = sim$precip_timing,
+    precip_intensity = sim$precip_intensity,
+    traveltime_seed = sim$traveltime_seed,
+    warm_up = warm_up,
+    stochastic_headwater_model = stochastic_headwater_model
   )
 
-  for (upstream_index in seq_along(upstream)) {
-    pb$tick()
+  # --- Route through network ---
+  net <- route_network(
+    OCN = sim$OCN, stream_order_dict = sim$stream_order_dict,
+    df_nodes_discharge = hw$discharge, df_nodes_conc = hw$concentration,
+    is_lateral_inflow = sim$is_lateral_inflow,
+    depth_dict = sim$depth_dict, celerity_dict = sim$celerity_dict,
+    volume_in = hw$volume_in, mass_in = hw$mass_in,
+    cellsize = sim$cellsize, tmax_yrs = tmax_yrs, warm_up = warm_up,
+    channel_params = channel_params, fixed_params = fixed_params,
+    precip_timing = sim$precip_timing,
+    precip_intensity = sim$precip_intensity,
+    traveltime_seed = sim$traveltime_seed,
+    stochastic_headwater_model = stochastic_headwater_model,
+    routing_function_ocn = routing_function_ocn
+  )
 
-    upstream_node <- upstream[[upstream_index]]
+  # --- Mass balance diagnostics ---
+  outlet_node <- which(sim$OCN$RN$downNode == 0)
+  outlet_node2 <- which(sim$OCN$RN$downNode == outlet_node)
 
-    # Extract subcatchment parameters for this headwater node
-    FD_node <- OCN$RN$toFD[upstream_node] # Corresponding flow direction node
-    upstream_area <- OCN$RN$A[upstream_node] # Upstream drainage area [m2]
-    mean_c_im_number <- OCN$FD$patches_concentration[FD_node] # Mean immobile concentration parameter
-    elevation <- OCN$FD$Z[FD_node] # Elevation [m]
+  log_warning_parallel(warning(glue("Length of time series: {nrow(net$concentration)}")), log_file)
 
-    fixed_params <- list(
-      gamma_sc = gamma_sc,
-      sigma_w_sc = sigma_w_sc,
-      oro_scaling = oro_scaling,
-      tmax_yrs = tmax_yrs,
-      rho = rho,
-      damkohler_transport = damkohler_transport,
-      damkohler_interarrival = damkohler_interarrival, # Damkohler number for interarrival time
-      damkohler_longterm = damkohler_longterm, # Damkohler number for long-term processes
-      interarrival_time_mean = interarrival_time_mean, # Mean time between precipitation events [days]
-      ET_max = ET_max, z_r = z_r, z_vz = z_vz, # Evapotranspiration and depth parameters
-      theta_fc = theta_fc, theta_wp = theta_wp, theta_res = theta_res, # Soil moisture parameters
-      R = R, mean_tr = mean_tr, theta_sat = theta_sat, # Recharge and saturation parameters
-      aquifer_z = aquifer_z, rain_per_year = rain_per_year # Aquifer depth and annual rainfall
-    )
+  outlet_conc <- net$concentration[warm_up:nrow(net$concentration)-1, outlet_node]
+  outlet_discharge <- net$discharge[warm_up:nrow(net$discharge)-1, outlet_node]
 
-    rho_seed <- sample(2^16, 1)
+  volume_out <- sum(outlet_discharge * 3600 * 24)
+  mass_out <- sum(outlet_discharge * outlet_conc * 3600 * 24)
 
-    if (precip_timing == "random") {
-      random_state_times <- sample(2^16, 1) # Generate new random seed
-    } else {
-      random_state_times <- precip_timing # Use fixed seed
-    }
+  pct_mass <- mass_out / net$mass_in * 100
+  pct_volume <- volume_out / net$volume_in * 100
 
-    if (precip_intensity == "random") {
-      random_state_rain <- sample(2^16, 1) # Generate new random seed
-    } else {
-      random_state_rain <- precip_intensity # Use fixed seed
-    }
-
-    if (traveltime_seed == "random") {
-      real_random <- sample(2^16, 1) # Generate new random seed
-    } else {
-      real_random <- traveltime_seed # Use fixed seed
-    }
-
-    # Combine variable and fixed parameters for subcatchment model
-    params <- list(
-      mean_c_im_number = mean_c_im_number, # Mean concentration parameter
-      random_state_times = random_state_times, # Precipitation timing seed
-      random_state_rain = random_state_rain, # Precipitation intensity seed
-      real_random = real_random, # Travel time seed
-      elevation = elevation, # Subcatchment elevation
-      rho_seed = rho_seed # Asynchrony random seed
-    )
-
-    params <- c(params, fixed_params)
-
-    # Call Python subcatchment-scale model to generate time series
-    result <- subcatchment_scale_module(param_dict = params)
-
-    discharge <- result[[1]]
-    discharge <- discharge / 100
-    discharge <- discharge / (24 * 60 * 60)
-    discharge <- discharge * upstream_area
-
-    concentration <- result[[2]] # Concentration time series
-
-    # Handle NaN values by replacing with mean concentration
-    concentration[is.nan(concentration)] <- mean(concentration, na.rm = TRUE)
-
-    volume_in <- volume_in + sum(discharge[warm_up:length(discharge)] * 3600 * 24)
-
-    mass_in <- mass_in + sum(discharge[warm_up:length(discharge)] * 3600 * 24 * concentration[warm_up:length(concentration)])
-
-    df_nodes_conc[, upstream_node] <- concentration
-    df_nodes_discharge[, upstream_node] <- discharge
-  }
-
-  # Process network by stream order (1st order → higher orders)
-  for (stream_order in c(1:max(OCN$AG$streamOrder))) {
-    stream_order_node_list <- get_stream_order_node_list(OCN, stream_order_dict, stream_order)
-
-    upstream_node_list <- get_upstream_node_list(OCN, stream_order_node_list, stream_order_dict, stream_order)
-
-    if (stream_order > 1) {
-      for (node in upstream_node_list) {
-        # Identify all streams flowing into this confluence
-        upstream_nodes <- which(OCN$RN$downNode == node)
-
-        # Apply hydraulic routing to transport discharge and concentration
-        # from upstream nodes to confluence, accounting for travel time and dispersion
-        result_routing <- routing_routine(
-          OCN = OCN,
-          upstream_nodes = upstream_nodes,
-          downstream_node = node,
-          df_nodes_discharge = df_nodes_discharge,
-          df_nodes_conc = df_nodes_conc,
-          cellsize = cellsize,
-          vf = vf,
-          mannings_n = mannings_n,
-          side_slope = side_slope,
-          routing_function_ocn = routing_function_ocn
-        )
-
-        # Extract routing results
-        df_discharge_upstream_routed <- result_routing[[1]] # Routed discharge time series
-        df_conc_upstream_routed <- result_routing[[2]] # Routed concentration time series
-        median_depth <- result_routing[[3]] # Median water depth for hydraulics
-        median_celerity <- result_routing[[4]] # Median flow celerity for hydraulics
-
-        # Store hydraulic properties
-        depth_dict[node] <- median_depth
-        celerity_dict[node] <- median_celerity
-
-        # Apply mixing routine to combine routed flows at confluence
-        result_mixing <- mixing_routine(
-          downstream_node = node,
-          df_discharge_upstream_routed = df_discharge_upstream_routed,
-          df_conc_upstream_routed = df_conc_upstream_routed,
-          df_nodes_discharge = df_nodes_discharge,
-          df_nodes_conc = df_nodes_conc
-        )
-
-        # Update network-wide time series with mixed results
-        df_nodes_discharge <- result_mixing[[1]]
-        df_nodes_conc <- result_mixing[[2]]
-
-        # Add lateral inflow
-        if (node %in% lateral_inflow_nodes) {
-          result_lateral <- lateral_inflow_routine(
-            OCN = OCN,
-            df_nodes_discharge = df_nodes_discharge,
-            df_nodes_conc = df_nodes_conc,
-            node = node,
-            cellsize = cellsize,
-            tmax_yrs = tmax_yrs,
-            warm_up = warm_up,
-            fixed_params = fixed_params,
-            volume_in = volume_in,
-            mass_in = mass_in,
-            subcatchment_scale_module = subcatchment_scale_module,
-            precip_timing,
-            precip_intensity,
-            traveltime_seed
-          )
-
-          # Update time series and mass balance with lateral inputs
-          df_nodes_discharge <- result_lateral[[1]]
-          df_nodes_conc <- result_lateral[[2]]
-          volume_in <- result_lateral[[3]]
-          mass_in <- result_lateral[[4]]
-        }
-      }
-    }
-
-    # For every upstream node of the repsective Strahler order, recursively iterate
-    # through the reach and populate downstream nodes
-    pb3 <- progress_bar$new(
-      format = glue("  Calculating stream order: {stream_order} [:bar] :percent eta: :eta"),
-      total = length(upstream_node_list), clear = FALSE, width = 60
-    )
-    for (node in upstream_node_list) {
-      pb3$tick()
-
-      result_pop_down <- populate_downstream(
-        OCN = OCN,
-        node = node,
-        df_nodes_discharge = df_nodes_discharge,
-        df_nodes_conc = df_nodes_conc,
-        cellsize = cellsize,
-        landscape_configuration_matrix = landscape_configuration_matrix,
-        lateral_inflow_nodes = lateral_inflow_nodes,
-        tmax_yrs = tmax_yrs,
-        warm_up = warm_up,
-        vf = vf,
-        mannings_n = mannings_n,
-        side_slope = side_slope,
-        fixed_params = fixed_params,
-        volume_in = volume_in,
-        mass_in = mass_in,
-        precip_timing = precip_timing,
-        precip_intensity = precip_intensity,
-        traveltime_seed = traveltime_seed,
-        subcatchment_scale_module = subcatchment_scale_module,
-        routing_function_ocn = routing_function_ocn,
-        depth_dict = depth_dict,
-        celerity_dict = celerity_dict
-      )
-      df_nodes_discharge <- result_pop_down[[1]]
-      df_nodes_conc <- result_pop_down[[2]]
-      volume_in <- result_pop_down[[3]]
-      mass_in <- result_pop_down[[4]]
-
-      depth_dict <- result_pop_down[[5]]
-      celerity_dict <- result_pop_down[[6]]
-    }
-  }
-
-  outlet_node <- which(OCN$RN$downNode == 0) # Main outlet node
-  outlet_node2 <- which(OCN$RN$downNode == outlet_node) # Node downstream of outlet
-
-  # Log simulation diagnostics
-  log_warning_parallel(warning(glue("Length of time series: {nrow(df_nodes_conc)}")), log_file)
-
-  outlet_node_conc <- df_nodes_conc[warm_up:nrow(df_nodes_conc), outlet_node]
-  outlet_node_discharge <- df_nodes_discharge[warm_up:nrow(df_nodes_discharge), outlet_node]
-
-  volume_out <- sum(outlet_node_discharge * 3600 * 24) # Convert m3/s to m3/day, sum over time
-  mass_out <- sum(outlet_node_discharge * outlet_node_conc * 3600 * 24) # Mass flux = discharge × concentration
-
-  percentage_error_mass <- mass_out / mass_in * 100
-  percentage_error_volume <- volume_out / volume_in * 100
-
-  log_warning_parallel(warning(glue("mass in: {mass_in}, mass out: {mass_out}, percent error: {percentage_error_mass}")), log_file)
-  log_warning_parallel(warning(glue("\nvolume in: {volume_in}, volume out: {volume_out}, percent error: {percentage_error_volume}")), log_file)
+  log_warning_parallel(warning(glue("mass in: {net$mass_in}, mass out: {mass_out}, percent error: {pct_mass}")), log_file)
+  log_warning_parallel(warning(glue("\nvolume in: {net$volume_in}, volume out: {volume_out}, percent error: {pct_volume}")), log_file)
   log_warning_parallel(warning(glue("Simulation Identifier: {simulation_identifier}")), log_file)
   log_warning_parallel("", log_file)
 
-  df_nodes_conc <- df_nodes_conc[warm_up:(tmax_yrs * 365), ]
-  df_nodes_discharge <- df_nodes_discharge[warm_up:(tmax_yrs * 365), ]
-
+  # --- Build parameter record ---
   df_params <- data.frame(
     simulation_identifier = simulation_identifier,
-    gamma_sc = gamma_sc,
-    sigma_w_sc = sigma_w_sc,
-    gamma_ls = gamma_ls,
-    sigma_w_ls = sigma_w_ls,
-    interarrival_time_mean = interarrival_time_mean,
-    rho = rho,
-    vf = vf,
+    gamma_sc = gamma_sc, sigma_w_sc = sigma_w_sc,
+    gamma_ls = gamma_ls, sigma_w_ls = sigma_w_ls,
+    interarrival_time_mean = interarrival_time_mean, rho = rho, vf = vf,
     damkohler_transport = damkohler_transport,
-    tmax_yrs = tmax_yrs,
-    warm_up = warm_up,
+    tmax_yrs = tmax_yrs, warm_up = warm_up,
     overall_mean_concentration = overall_mean_concentration,
     oro_scaling = oro_scaling,
     damkohler_interarrival = damkohler_interarrival,
     damkohler_longterm = damkohler_longterm,
-    rain_per_year = rain_per_year,
-    ET_max = ET_max,
-    z_r = z_r,
-    z_vz = z_vz,
-    theta_fc = theta_fc,
-    theta_wp = theta_wp,
-    theta_res = theta_res,
-    R = R,
-    mean_tr = mean_tr,
-    theta_sat = theta_sat,
-    aquifer_z = aquifer_z,
-    mannings_n = mannings_n,
-    side_slope = side_slope,
-    volume_in = volume_in,
-    volume_out = volume_out,
-    mass_in = mass_in,
-    mass_out = mass_out,
-    percentage_error_mass = percentage_error_mass,
-    percentage_error_volume = percentage_error_volume,
+    rain_per_year = rain_per_year, ET_max = ET_max,
+    z_r = z_r, z_vz = z_vz,
+    theta_fc = theta_fc, theta_wp = theta_wp, theta_res = theta_res,
+    R = R, mean_tr = mean_tr, theta_sat = theta_sat,
+    aquifer_z = aquifer_z, mannings_n = mannings_n, side_slope = side_slope,
+    volume_in = net$volume_in, volume_out = volume_out,
+    mass_in = net$mass_in, mass_out = mass_out,
+    percentage_error_mass = pct_mass,
+    percentage_error_volume = pct_volume,
     outlet_node = outlet_node2[[1]],
     network = network
   )
 
-  df_nodes_conc <- as.data.frame(df_nodes_conc)
-  df_nodes_discharge <- as.data.frame(df_nodes_discharge)
-
-  # save df_params
-  write_parquet(df_params, file.path(path_to_output, glue("data/{simulation_identifier}_params.parquet")))
-
-  # save df_nodes_conc
-  write_parquet(df_nodes_conc, file.path(path_to_output, glue("data/{simulation_identifier}_conc_wide.parquet")))
-
-  # save df_nodes_discharge
-  write_parquet(df_nodes_discharge, file.path(path_to_output, glue("data/{simulation_identifier}_discharge_wide.parquet")))
-
-  # Save OCN object
-  save(OCN, file = file.path(path_to_output, glue("data/{simulation_identifier}_OCN.RData")))
-
-  # save depth_dict as pickle
-  saveRDS(depth_dict, file.path(path_to_output, glue("data/{simulation_identifier}_depth_dict.rds")))
-
-  # save celerity_dict as pickle
-  saveRDS(celerity_dict, file.path(path_to_output, glue("data/{simulation_identifier}_celerity_dict.rds")))
+  # --- Write output ---
+  write_simulation_output(
+    df_nodes_conc = net$concentration, df_nodes_discharge = net$discharge,
+    OCN = sim$OCN, depth_dict = net$depth_dict, celerity_dict = net$celerity_dict,
+    df_params = df_params, warm_up = warm_up, tmax_yrs = tmax_yrs,
+    path_to_output = path_to_output, simulation_identifier = simulation_identifier
+  )
 
   # Return NULL to prevent doFuture from printing last variable
   NULL
