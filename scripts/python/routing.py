@@ -25,6 +25,8 @@ MINIMUM_DISCHARGE = 1e-6  # Minimum discharge to avoid numerical issues [m³/s]
 COURANT_NUMBER_THRESHOLD_HIGH = 0.95  # Courant number threshold for stability
 COURANT_NUMBER_THRESHOLD_LOW = 0.5  # Courant number threshold for stability
 MAX_ITER = 50  # Maximum iterations for MCT
+SECONDS_PER_DAY = 86400  # Seconds per day
+INFLOW_RATIO_THRESHOLD = 5.0  # Max allowed inflow ratio between timesteps for concentration stability
 
 
 # ============================================================================
@@ -34,12 +36,12 @@ MAX_ITER = 50  # Maximum iterations for MCT
 
 @jit(nopython=True, fastmath=True)
 def stage_discharge_relationship(
-    stage_y: float,
-    bottom_width_int: float,
-    mannings_n: float,
-    bottom_slope: float,
-    sinus_alpha: float,
-    cot_alpha: float,
+        stage_y: float,
+        bottom_width_int: float,
+        mannings_n: float,
+        bottom_slope: float,
+        sinus_alpha: float,
+        cot_alpha: float,
 ) -> float:
     """
     Calculate discharge for a given stage (Equation B2/C4 in Todini et al., 2007).
@@ -72,10 +74,10 @@ def stage_discharge_relationship(
 
     # Discharge based on Equation B2/C4
     discharge = (
-        (1 / mannings_n)
-        * (bottom_slope**0.5)
-        * (wetted_area ** (5 / 3))
-        * (1 / (wetted_perimeter ** (2 / 3)))
+            (1 / mannings_n)
+            * (bottom_slope ** 0.5)
+            * (wetted_area ** (5 / 3))
+            * (1 / (wetted_perimeter ** (2 / 3)))
     )
 
     return discharge
@@ -83,12 +85,12 @@ def stage_discharge_relationship(
 
 @jit(nopython=True, fastmath=True)
 def d_stage_discharge_relationship(
-    stage_y: float,
-    bottom_width_int: float,
-    mannings_n: float,
-    bottom_slope: float,
-    sinus_alpha: float,
-    cot_alpha: float,
+        stage_y: float,
+        bottom_width_int: float,
+        mannings_n: float,
+        bottom_slope: float,
+        sinus_alpha: float,
+        cot_alpha: float,
 ) -> float:
     """
     Calculate the derivative of discharge with respect to stage (Equation C6 for c(y)
@@ -129,13 +131,13 @@ def d_stage_discharge_relationship(
 
     # Equation C6: Calculate celerity
     celerity = (
-        (5 / 3)
-        * (bottom_slope**0.5 / mannings_n)
-        * (wetted_area ** (2 / 3) / wetted_perimeter ** (2 / 3))
-        * (
-            1
-            - (4 / 5) * (wetted_area / (surface_width * wetted_perimeter * sinus_alpha))
-        )
+            (5 / 3)
+            * (bottom_slope ** 0.5 / mannings_n)
+            * (wetted_area ** (2 / 3) / wetted_perimeter ** (2 / 3))
+            * (
+                    1
+                    - (4 / 5) * (wetted_area / (surface_width * wetted_perimeter * sinus_alpha))
+            )
     )
 
     # Equation B6: Derivative of discharge with respect to stage
@@ -144,19 +146,19 @@ def d_stage_discharge_relationship(
 
 @jit(nopython=True, fastmath=True)
 def newton_raphson(
-    q_target: float,
-    initial_guess: float,
-    bottom_width_int: float,
-    mannings_n: float,
-    bottom_slope: float,
-    sinus_alpha: float,
-    cot_alpha: float,
-    tolerance: float = 0.0001,
-    max_iterations: int = 100,
+        q_target: float,
+        initial_guess: float,
+        bottom_width_int: float,
+        mannings_n: float,
+        bottom_slope: float,
+        sinus_alpha: float,
+        cot_alpha: float,
+        tolerance: float = 0.0001,
+        max_iterations: int = 100,
 ) -> float:
     """
     Solve for water stage given target discharge using Newton-Raphson method
-    based on Equation B3 in Todini et al., (2007).
+    based on Equation B3 in Todini et al. (2007).
 
     Parameters
     ----------
@@ -189,15 +191,15 @@ def newton_raphson(
     for iteration in range(max_iterations):
         # Calculate residual: f(h) = Q(h) - Q_target
         discharge_residual = (
-            stage_discharge_relationship(
-                stage_estimate,
-                bottom_width_int,
-                mannings_n,
-                bottom_slope,
-                sinus_alpha,
-                cot_alpha,
-            )
-            - q_target
+                stage_discharge_relationship(
+                    stage_estimate,
+                    bottom_width_int,
+                    mannings_n,
+                    bottom_slope,
+                    sinus_alpha,
+                    cot_alpha,
+                )
+                - q_target
         )
 
         # Calculate derivative: f'(h) = dQ/dh
@@ -224,6 +226,83 @@ def newton_raphson(
     return stage_estimate
 
 
+@jit(nopython=True, fastmath=True)
+def compute_hydraulic_properties(
+        stage_y: float,
+        bottom_width_int: float,
+        mannings_n: float,
+        bottom_slope: float,
+        sinus_alpha: float,
+        cot_alpha: float,
+) -> Tuple[float, float, float, float, float, float]:
+    """
+    Compute hydraulic geometry properties for a trapezoidal channel.
+
+    Given a water stage and channel geometry, computes wetted area, surface
+    width, wetted perimeter, velocity, celerity, and beta (Eqs C1-C7 in
+    Todini et al. (2007)).
+
+    Parameters
+    ----------
+    stage_y : float
+        Water stage (depth) above channel bottom [m].
+    bottom_width_int : float
+        Bottom width of the trapezoidal channel [m].
+    mannings_n : float
+        Manning's roughness coefficient [-].
+    bottom_slope : float
+        Longitudinal slope of the channel bottom [-].
+    sinus_alpha : float
+        Sine of the bank slope angle [-].
+    cot_alpha : float
+        Cotangent of the bank slope angle (horizontal/vertical) [-].
+
+    Returns
+    -------
+    wetted_area : float
+        Wetted cross-sectional area [m²].
+    surface_width : float
+        Water surface width [m].
+    wetted_perimeter : float
+        Wetted perimeter [m].
+    velocity : float
+        Mean flow velocity [m/s].
+    celerity : float
+        Flood wave celerity [m/s].
+    beta : float
+        Ratio of celerity to velocity [-].
+    """
+    # Equation C1: A(y) - wetted area
+    wetted_area = (bottom_width_int + stage_y * cot_alpha) * stage_y
+
+    # Equation C2: B(y) - surface width
+    surface_width = bottom_width_int + (2 * stage_y * cot_alpha)
+
+    # Equation C3: P(y) - wetted perimeter
+    wetted_perimeter = bottom_width_int + ((2 * stage_y) / sinus_alpha)
+
+    # Equation C5: velocity
+    velocity = (bottom_slope ** 0.5 / mannings_n) * (
+            (wetted_area ** (2 / 3)) / wetted_perimeter ** (2 / 3)
+    )
+
+    # Equation C6: celerity
+    celerity = (
+            (5 / 3)
+            * (bottom_slope ** 0.5 / mannings_n)
+            * (wetted_area ** (2 / 3) / wetted_perimeter ** (2 / 3))
+            * (
+                    1
+                    - (4 / 5) * (wetted_area / (surface_width * wetted_perimeter * sinus_alpha))
+            )
+    )
+
+    # Equation C7: beta
+    beta = celerity / velocity
+
+    return wetted_area, surface_width, wetted_perimeter, velocity, celerity, beta
+
+
 # ============================================================================
 # REACH ROUTING FUNCTIONS
 # ============================================================================
@@ -231,16 +310,16 @@ def newton_raphson(
 
 @jit(nopython=True, fastmath=True)
 def reach_routing(
-    inflow: np.ndarray,
-    conc: np.ndarray,
-    dt_ref: float,
-    dx: float,
-    bottom_slope: float,
-    mannings_n: float,
-    bottom_width_int: float,
-    side_slope: float,
-    vf: float,
-    optimized_calc: bool = False,
+        inflow: np.ndarray,
+        conc: np.ndarray,
+        dt_ref: float,
+        dx: float,
+        bottom_slope: float,
+        mannings_n: float,
+        bottom_width_int: float,
+        side_slope: float,
+        vf: float,
+        optimized_calc: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Perform routing using Muskingum-Cunge-Todini method.
@@ -256,7 +335,7 @@ def reach_routing(
     conc : np.ndarray
         Time series of inflow concentration values [mg/L].
     dt_ref : float
-        Reference time step for the simulation [s].
+        Reference time step for the simulation [h].
     dx : float
         Spatial discretization step (reach length) [m].
     bottom_slope : float
@@ -268,7 +347,8 @@ def reach_routing(
     side_slope : float
         Side slope of the trapezoidal channel (horizontal:vertical) [-].
     vf : float
-        Velocity factor or parameter (usage depends on implementation).
+        Settling velocity for in-stream first-order loss [m/day].
+        Loss rate is computed as ke = vf / depth / 86400 [1/s].
     optimized_calc : bool, optional
         If True, returns only essential outputs for computational efficiency.
         If False, returns all diagnostic variables. Default is False.
@@ -280,7 +360,7 @@ def reach_routing(
     conc_routed_list : np.ndarray
         Time series of outflow concentration values [mg/L].
     t_list : np.ndarray
-        Time series of time steps [s].
+        Time series of time steps [h].
     storage_list : np.ndarray
         Time series of storage values [m³] (NaN array if optimized_calc is True).
     in_list : np.ndarray
@@ -303,8 +383,8 @@ def reach_routing(
 
     # Array of possible time steps [h]
     dt_array = np.array(
-        [   
-            # 1 / 60,
+        [
+            1 / 60,
             5 / 60,
             6 / 60,
             10 / 60,
@@ -324,7 +404,7 @@ def reach_routing(
     )
 
     # Hard-coded channel properties; trapezoidal cross section
-    sinus_alpha = 1 / (1 + side_slope**2) ** 0.5
+    sinus_alpha = 1 / (1 + side_slope ** 2) ** 0.5
     cot_alpha = side_slope / 1
     safety_factor = 0.9
 
@@ -336,7 +416,10 @@ def reach_routing(
     counter = 0
 
     # Pre-allocate arrays (oversized, will be trimmed later)
-    len_empty_array = 10 * 365 * 24 * 60  # 10 years in minutes
+    # Sized for 10 years of minute-resolution output.
+    # Sufficient for up to 50 years of daily input at the minimum adaptive
+    # timestep (5 min). Exceeding this raises an IndexError.
+    len_empty_array = 10 * 365 * 24 * 60
 
     # Essential output arrays (always calculated)
     out_list = np.zeros(len_empty_array)
@@ -374,8 +457,12 @@ def reach_routing(
     if not optimized_calc:
         depth_list[0] = stageref1
 
-    # Equation C1: A(y) - wetted area
-    wetted_arearef1 = (bottom_width_int + stageref1 * cot_alpha) * stageref1
+    # Compute hydraulic properties at initial conditions (Eqs C1-C7)
+    wetted_arearef1, surface_widthref1, _, vref1, cref1, betaref1 = (
+        compute_hydraulic_properties(
+            stageref1, bottom_width_int, mannings_n, bottom_slope, sinus_alpha, cot_alpha
+        )
+    )
 
     # Calculate initial storage load based on wetted area
     load_storage_t_minus_1 = wetted_arearef1 * dx * conc[0]
@@ -383,37 +470,8 @@ def reach_routing(
         storage_list[0] = wetted_arearef1 * dx
         load_storage_list[0] = storage_list[0] * conc[0]
 
-    # Equation C2: B(y) - surface width
-    surface_widthref1 = bottom_width_int + (2 * stageref1 * cot_alpha)
-
-    # Equation C3: P(y) - wetted perimeter
-    wetted_perimeterref1 = bottom_width_int + ((2 * stageref1) / sinus_alpha)
-
-    # Equation C5: velocity
-    vref1 = (bottom_slope**0.5 / mannings_n) * (
-        (wetted_arearef1 ** (2 / 3)) / wetted_perimeterref1 ** (2 / 3)
-    )
-
-    # Equation C6: celerity
-    cref1 = (
-        (5 / 3)
-        * (bottom_slope**0.5 / mannings_n)
-        * (wetted_arearef1 ** (2 / 3) / wetted_perimeterref1 ** (2 / 3))
-        * (
-            1
-            - (4 / 5)
-            * (
-                wetted_arearef1
-                / (surface_widthref1 * wetted_perimeterref1 * sinus_alpha)
-            )
-        )
-    )
-
     if not optimized_calc:
         celerity_list[0] = cref1
-
-    # Equation C7: equivalent to Equation 49a
-    betaref1 = cref1 / vref1
 
     # Equation 51a: Reynolds number
     reynoldref1 = qref1 / (betaref1 * surface_widthref1 * bottom_slope * cref1 * dx)
@@ -423,7 +481,7 @@ def reach_routing(
 
     # Select next smallest dt from dt_array
     initial_dt = max(min(dt_array), initial_dt)
-    initial_dt = max([i for i in dt_array if i <= initial_dt])
+    initial_dt = max([x for x in dt_array if x <= initial_dt])
     dt_next = initial_dt
 
     # Main routing loop: calculate time steps until end of simulation
@@ -441,6 +499,15 @@ def reach_routing(
         # Interpolate inflow and concentration at time t+dt
         in_t_1 = np.interp(((i + dt) / dt_ref), np.arange(0, len(inflow)), inflow)
         conc_in_t_1 = np.interp(((i + dt) / dt_ref), np.arange(0, len(conc)), conc)
+
+        # Reduce dt if inflow changes too rapidly between timesteps.
+        inflow_ratio = max(in_t_1, in_t) / max(min(in_t_1, in_t), MINIMUM_DISCHARGE)
+        while inflow_ratio > INFLOW_RATIO_THRESHOLD and dt > min(dt_array):
+            dt = max([x for x in dt_array if x < dt][-1], min(dt_array))
+            dt_in_sec = dt * 3600
+            in_t_1 = np.interp(((i + dt) / dt_ref), np.arange(0, len(inflow)), inflow)
+            conc_in_t_1 = np.interp(((i + dt) / dt_ref), np.arange(0, len(conc)), conc)
+            inflow_ratio = max(in_t_1, in_t) / max(min(in_t_1, in_t), MINIMUM_DISCHARGE)
 
         # Call function that calculates the next time step
         (
@@ -484,36 +551,26 @@ def reach_routing(
 
         # Equation 54: storage calculations
         storage_t_1 = (((1 - reynoldref2) * dt_in_sec) / (2 * courantref2)) * in_t_1 + (
-            ((1 + reynoldref2) * dt_in_sec) / (2 * courantref2)
+                ((1 + reynoldref2) * dt_in_sec) / (2 * courantref2)
         ) * out_t_1
 
-        # Concentration routing and mixing routines
         volume_in_t_1 = in_t_1 * dt_in_sec
         volume_out_t_1 = out_t_1 * dt_in_sec
-        conc_storage_t = conc_routed_list[counter]
 
-        # Mass balance calculations
         load_storage_t = load_storage_t_minus_1  # Load in storage at time t
-        load_storage_t_1 = (
-            load_storage_t
-            - (volume_out_t_1 * conc_storage_t)
-            + (volume_in_t_1 * conc_in_t_1)
-        )  # Load in storage at time t+1
 
-        # Check for negative load (numerical instability)
-        # Occurs when concentration decreases rapidly - outgoing > incoming + stored
-        if load_storage_t_1 < 0:
-            if dt != min(dt_array):
-                # Select smaller dt and recalculate
-                dt_next = [dt_next for dt_next in dt_array if dt_next < dt][0]
-                continue
+        # Concentration at (t + dt): implicit scheme
+        conc_storage_t_1 = (
+                (load_storage_t + volume_in_t_1 * conc_in_t_1)
+                / (storage_t_1 + volume_out_t_1)
+        )
 
         # In-stream 1st order loss (settling/decay)
-        ke = vf / stageref2 / 86400  # Convert vf to loss rate [1/s]
-        load_storage_t_1_loss = load_storage_t_1 * np.exp(-ke * dt_in_sec)
+        ke = vf / stageref2 / SECONDS_PER_DAY  # vf [m/day] / depth [m] → [1/s]
+        conc_storage_t_1 = conc_storage_t_1 * np.exp(-ke * dt_in_sec)
 
-        # Calculate concentration in storage at t+1
-        conc_storage_t_1 = load_storage_t_1_loss / storage_t_1
+        # Update load in storage from new concentration
+        load_storage_t_1_loss = storage_t_1 * conc_storage_t_1
 
         # Store results for current time step
         conc_routed_list[counter + 1] = conc_storage_t_1
@@ -541,8 +598,8 @@ def reach_routing(
 
         counter += 1
         i = i + dt
-    
-    # Trim arrays to actual length (remove pre-allocated zeros)
+
+    # Trim arrays to actual length
     out_list = out_list[: counter + 1]
     conc_routed_list = conc_routed_list[: counter + 1]
     t_list = t_list[: counter + 1]
@@ -578,22 +635,22 @@ def reach_routing(
 
 @jit(nopython=True, fastmath=True)
 def reach_routing_single_time_step(
-    in_t: float,
-    in_t_1: float,
-    out_t: float,
-    dt: float,
-    dt_ref: float,
-    dt_array: np.ndarray,
-    safety_factor: float,
-    dx: float,
-    bottom_slope: float,
-    bottom_width_int: float,
-    mannings_n: float,
-    sinus_alpha: float,
-    cot_alpha: float,
-    reynoldref1: float,
-    cref1: float,
-    betaref1: float,
+        in_t: float,
+        in_t_1: float,
+        out_t: float,
+        dt: float,
+        dt_ref: float,
+        dt_array: np.ndarray,
+        safety_factor: float,
+        dx: float,
+        bottom_slope: float,
+        bottom_width_int: float,
+        mannings_n: float,
+        sinus_alpha: float,
+        cot_alpha: float,
+        reynoldref1: float,
+        cref1: float,
+        betaref1: float,
 ) -> Tuple[float, float, float, float, float, float, float, float, float]:
     """
     This function performs a single time step of the reach routing and is called by reach_routing function.
@@ -657,7 +714,10 @@ def reach_routing_single_time_step(
 
     # Set maximum iteration limit and initialize counters
     counter = 1
-    flag = True
+    # courant_acceptable: True while Courant number is within bounds.
+    # Set to False when Courant triggers a dt adjustment, which exits
+    # the convergence loop and returns the adjusted dt to the caller.
+    courant_acceptable = True
 
     # Equation 45: initial guess estimate
     q_guess = out_t + (in_t_1 - in_t)
@@ -668,87 +728,60 @@ def reach_routing_single_time_step(
     if abs(last_guess - q_guess) <= tresh:
         last_guess = last_guess + abs(last_guess - q_guess) + tresh
 
-    percent = abs(100 - (q_guess / last_guess) * 100)
-
     # Iterative solution loop
-    while (abs(last_guess - q_guess) > tresh) and flag:
+    while (abs(last_guess - q_guess) > tresh) and courant_acceptable:
         last_guess = q_guess
         dt_in_sec = dt * 3600
 
         # Equation 50a: Courant number
         courantref1 = (cref1 / betaref1) * (dt_in_sec / dx)
-        
+
         # repeat the computation of equations (46b), (47b), (48b), (49b), (50b), (51b), (52) and (53)
         # twice to eliminate influence of the first guess (equation 45)
         repeat = 1
         while repeat < 3:
             # Equation 46b: calculate reference discharge at t+dt
             qref2 = (in_t_1 + q_guess) / 2
-    
+
             # Ensure discharge doesn't approach zero (numerical stability)
             if qref2 < MINIMUM_DISCHARGE:
                 qref2 = MINIMUM_DISCHARGE
-    
+
             # Calculate hydraulic properties for reference discharge
             # Equation 47b: calculate stage using Newton-Raphson approach
             stageref2 = newton_raphson(
                 qref2, 1, bottom_width_int, mannings_n, bottom_slope, sinus_alpha, cot_alpha
             )
-    
-            # Equation C1: A(y) - wetted area
-            wetted_arearef2 = (bottom_width_int + stageref2 * cot_alpha) * stageref2
-    
-            # Equation C2: B(y) - surface width
-            surface_widthref2 = bottom_width_int + (2 * stageref2 * cot_alpha)
-    
-            # Equation C3: P(y) - wetted perimeter
-            wetted_perimeterref2 = bottom_width_int + ((2 * stageref2) / sinus_alpha)
-    
-            # Equation C5: velocity
-            vref2 = (bottom_slope**0.5 / mannings_n) * (
-                (wetted_arearef2 ** (2 / 3)) / wetted_perimeterref2 ** (2 / 3)
-            )
-    
-            # Equation C6: celerity
-            cref2 = (
-                (5 / 3)
-                * (bottom_slope**0.5 / mannings_n)
-                * (wetted_arearef2 ** (2 / 3) / wetted_perimeterref2 ** (2 / 3))
-                * (
-                    1
-                    - (4 / 5)
-                    * (
-                        wetted_arearef2
-                        / (surface_widthref2 * wetted_perimeterref2 * sinus_alpha)
-                    )
+
+            # Compute hydraulic properties at reference discharge (Eqs C1-C7)
+            _, surface_widthref2, _, vref2, cref2, betaref2 = (
+                compute_hydraulic_properties(
+                    stageref2, bottom_width_int, mannings_n, bottom_slope, sinus_alpha, cot_alpha
                 )
             )
-    
-            # Equation C7: equivalent to Equation 49b
-            betaref2 = cref2 / vref2
-            
+
             # Equation 50b: Courant number
             courantref2 = (cref2 / betaref2) * (dt_in_sec / dx)
-    
+
             # Equation 51b: Reynolds number
             reynoldref2 = qref2 / (betaref2 * surface_widthref2 * bottom_slope * cref2 * dx)
-    
+
             # Equation 52: Muskingum-Cunge-Todini (MCT) parameters
             c0 = (-1 + courantref2 + reynoldref2) / (1 + courantref2 + reynoldref2)
             c1 = ((1 + courantref1 - reynoldref1) / (1 + courantref2 + reynoldref2)) * (
-                courantref2 / courantref1
+                    courantref2 / courantref1
             )
             c2 = ((1 - courantref1 + reynoldref1) / (1 + courantref2 + reynoldref2)) * (
-                courantref2 / courantref1
+                    courantref2 / courantref1
             )
-            
+
             # Equation 53: calculate new discharge estimate
             q_guess = (c0 * in_t_1) + (c1 * in_t) + (c2 * out_t)
-            
+
             repeat += 1
 
         counter += 1
-        flag = True
+        courant_acceptable = True
 
         # Ensure discharge doesn't approach zero
         if q_guess < MINIMUM_DISCHARGE:
@@ -762,13 +795,13 @@ def reach_routing_single_time_step(
         # Adaptive time stepping based on Courant number
         if courantref2 < COURANT_NUMBER_THRESHOLD_LOW:  # Courant too small, increase time step
             dt = safety_factor * ((dx / cref2) / 3600)
-            flag = False
+            courant_acceptable = False
         elif courantref2 > COURANT_NUMBER_THRESHOLD_HIGH:  # Courant too large, decrease time step
             dt = safety_factor * ((dx / cref2) / 3600)
-            flag = False
+            courant_acceptable = False
 
         # Select appropriate dt from available options
-        if not flag:
+        if not courant_acceptable:
             dt = max(min(dt_array), dt)
             dt = max([n for n in dt_array if n <= dt])
             dt = min(dt_ref, dt)
@@ -842,7 +875,7 @@ def resample_routed_lists(
         freq = f"{int(dt_min)}min"
     else:
         freq = f"{int(dt_ref)}h"
-    
+
     daterange = pd.date_range(
         start=df.index[0], end=df.index[-1], freq=freq, inclusive="both"
     )
@@ -852,16 +885,16 @@ def resample_routed_lists(
 
 
 def routing_function_ocn(
-    inflow: np.ndarray,
-    conc: np.ndarray,
-    dx: float,
-    dt_ref: float,
-    bottom_slope: float,
-    mannings_n: float,
-    reach_length: float,
-    bottom_width_int: float,
-    side_slope: float,
-    vf: float,
+        inflow: np.ndarray,
+        conc: np.ndarray,
+        dx: float,
+        dt_ref: float,
+        bottom_slope: float,
+        mannings_n: float,
+        reach_length: float,
+        bottom_width_int: float,
+        side_slope: float,
+        vf: float,
 ) -> List:
     """
     This function is called in R and performs the routing using reach_routing function.
@@ -887,7 +920,7 @@ def routing_function_ocn(
     side_slope : float
         Side slope of the channel
     vf : float
-        mass transfer coefficient
+        Settling velocity for in-stream first-order loss [m/day]
 
     Returns
     -------
@@ -906,6 +939,12 @@ def routing_function_ocn(
 
     # Calculate number of sub-reaches
     n_reaches = int(reach_length / dx)
+
+    if n_reaches < 1:
+        raise ValueError(
+            f"reach_length ({reach_length} m) must be >= dx ({dx} m), "
+            f"got n_reaches = {n_reaches}"
+        )
 
     # Check for reach length discretization consistency
     if n_reaches * dx != reach_length:
